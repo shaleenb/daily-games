@@ -366,6 +366,8 @@ test('Worker strict Alice vs Bob isolation, games CRUD/reorder, entries upsert, 
   const aliceCluesStarter = aliceBoot.json.games.find((g) => g.slug === 'cluesbysam');
   assert.equal(aliceCluesStarter.parserId, 'cluesbysam');
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'perceptle' && g.parserId === 'perceptle'));
+  assert.ok(aliceBoot.json.games.some((g) => g.slug === 'fermi' && g.parserId === 'fermi'));
+  assert.ok(aliceBoot.json.games.some((g) => g.slug === 'magnitudle' && g.parserId === 'magnitudle'));
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'plain' && g.parserId === 'plain'));
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'timeguessr' && g.parserId === 'timeguessr'));
   assert.equal(aliceBoot.json.user.email, 'alice@example.com');
@@ -1750,6 +1752,214 @@ test('Worker GET /api/leaderboard days=1 off-local targetDate parity + todayPoin
   assert.deepEqual(cMatrix30.todayMedals, { gold: 0, silver: 0, bronze: 1 });
   assert.equal(cMatrix30.todayRank, 3);
   assert.equal(d30.todayRank, null);
+
+  harness.sqliteDb.close();
+});
+
+test('Worker fermi_magnitudle_grids_backfill_v1: repairs Fermi 1.19 -> 1.30× & 134 -> 27.6×, respects manual_override, and backfills Magnitudle, Perceptle & TimeGuessr grids', async () => {
+  const harness = createWorkerHarness({ applyMigration: true });
+  const now = '2026-11-16T00:00:00.000Z';
+
+  const catalogSql = fs.readFileSync(
+    path.join(PROJECT_ROOT, 'migrations', '0002_game_catalog.sql'),
+    'utf8',
+  );
+  harness.sqliteDb.exec(catalogSql);
+
+  const { sha256Hex } = await import('../shared/auth-crypto.js');
+  const rawToken = 'fermi-mig-session-token';
+  const tokenHash = await sha256Hex(rawToken);
+
+  harness.sqliteDb.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+    INSERT INTO schema_migrations (id, applied_at) VALUES
+      ('wave2_starters_and_cluesbysam_v1', '2026-11-16T00:00:00.000Z'),
+      ('cluesbysam_difficulty_backfill_v1', '2026-11-16T00:00:00.000Z'),
+      ('perceptle_parser_and_backfill_v1', '2026-11-16T00:00:00.000Z');
+    INSERT INTO users (id, email, display_name, password_hash, password_salt, created_at)
+    VALUES (1, 'fm-d1@example.com', 'Player', 'h', 's', '2026-11-01T00:00:00Z');
+    INSERT INTO games (id, user_id, name, slug, url, metric_label, metric_format, metric_direction, parser_id, sort_order, archived, created_at)
+    VALUES
+      (1, 1, 'Fermi', 'fermi', 'https://fermi.gg', 'Avg Multiplier', 'number', 'lower_is_better', 'auto', 6, 0, '2026-11-01T00:00:00Z'),
+      (2, 1, 'Magnitudle', 'magnitudle', 'https://magnitudle.com', 'Score', 'number', 'higher_is_better', 'auto', 7, 0, '2026-11-01T00:00:00Z'),
+      (3, 1, 'Perceptle', 'perceptle', 'https://perceptle.com', 'Score', 'number', 'higher_is_better', 'perceptle', 4, 0, '2026-11-01T00:00:00Z'),
+      (4, 1, 'TimeGuessr', 'timeguessr', 'https://timeguessr.com', 'Score', 'number', 'higher_is_better', 'timeguessr', 9, 0, '2026-11-01T00:00:00Z');
+    INSERT INTO game_catalog (slug, name, url, metric_label, metric_format, metric_direction, parser_id, created_at, updated_at)
+    VALUES
+      ('fermi', 'Fermi', 'https://fermi.gg', 'Avg Multiplier', 'number', 'lower_is_better', 'auto', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z'),
+      ('magnitudle', 'Magnitudle', 'https://magnitudle.com', 'Score', 'number', 'higher_is_better', 'auto', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z');
+  `);
+  harness.sqliteDb
+    .prepare(
+      'INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)',
+    )
+    .run('sess-fm', 1, tokenHash, '2099-01-01T00:00:00.000Z', now);
+
+  const ins = harness.sqliteDb.prepare(`
+    INSERT INTO entries (
+      id, user_id, game_id, play_date, raw_text, parser_id, parser_version,
+      completed, solved, primary_value, display_value, puzzle_id,
+      breakdown_json, metadata_json, manual_override, created_at, updated_at
+    ) VALUES (?, 1, ?, ?, ?, ?, 1, 1, NULL, ?, ?, ?, ?, ?, ?, '2026-11-16T00:00:00Z', '2026-11-16T00:00:00Z')
+  `);
+
+  // 1. Legacy Fermi wrong 1.19 (manual_override = 0)
+  ins.run(
+    1,
+    1,
+    '2026-11-16',
+    'Fermi · No. 113\n01 ↑ 1.28×\n02 ↓ 1.42×\n03 ↓ 1.19×\n─────────\n1.30× score · top 2%\n<https://fermi.gg/s/daily>',
+    'generic',
+    1.19,
+    '1.19',
+    null,
+    '[]',
+    '{}',
+    0,
+  );
+  // 2. Legacy Fermi wrong 134 (manual_override = 0)
+  ins.run(
+    2,
+    1,
+    '2026-11-15',
+    'Fermi · No. 112\n01 ↑ 64.1×\n02 ↑ 2.46×\n03 ↑ 134×\n─────────\n27.6× score · top 89%',
+    'generic',
+    134,
+    '134',
+    null,
+    '[]',
+    '{}',
+    0,
+  );
+  // 3. Manual Fermi 6.11 with unprefixed puzzle_id '113' -> preserves 6.11 / display, normalizes '#113', adds breakdown + grid
+  ins.run(
+    3,
+    1,
+    '2026-11-14',
+    'Fermi · No. 113\n01 ↑ 1.28×\n02 ↓ 1.42×\n03 ↓ 1.19×\n─────────\n1.30× score · top 2%',
+    'generic',
+    6.11,
+    '6.11× manual',
+    '113',
+    '[]',
+    '{}',
+    1,
+  );
+  // 4. Double-pasted Magnitudle Size It Up #99 -> dedupes grid & adds 5-row breakdown
+  const magGridDup =
+    '🟥🟥⬜⬜⬜ 39\n🟥🟥🟥⬜⬜ 53\n⬜⬜⬜⬜⬜ 4\n⬜⬜⬜⬜⬜ 0\n🟥⬜⬜⬜⬜ 20\n🟥🟥⬜⬜⬜ 39\n🟥🟥🟥⬜⬜ 53\n⬜⬜⬜⬜⬜ 4\n⬜⬜⬜⬜⬜ 0\n🟥⬜⬜⬜⬜ 20';
+  ins.run(
+    4,
+    2,
+    '2026-11-16',
+    'Size It Up\n#99\n\nScore: 116/500\n\n🟥🟥⬜⬜⬜ 39\n🟥🟥🟥⬜⬜ 53\n⬜⬜⬜⬜⬜ 4\n⬜⬜⬜⬜⬜ 0\n🟥⬜⬜⬜⬜ 20\nSize It Up\n#99\n\nScore: 116/500\n\n🟥🟥⬜⬜⬜ 39\n🟥🟥🟥⬜⬜ 53\n⬜⬜⬜⬜⬜ 4\n⬜⬜⬜⬜⬜ 0\n🟥⬜⬜⬜⬜ 20',
+    'generic',
+    116,
+    '116/500',
+    '#99',
+    '[]',
+    JSON.stringify({ emojiGrid: magGridDup }),
+    0,
+  );
+  // 5. Perceptle with breakdown already populated (missing emojiGrid)
+  ins.run(
+    5,
+    3,
+    '2026-11-16',
+    'Perceptle #122 - C (69)\n🔢 57  🎯 93  📐 100  🥁 3  ✂️ 93\nhttps://perceptle.com',
+    'perceptle',
+    69,
+    '69 (C)',
+    '#122',
+    JSON.stringify([
+      { key: 'count', icon: '🔢', name: 'Count', label: '🔢 Count', value: 57, max: 100, display: '57' },
+    ]),
+    JSON.stringify({ grade: 'C', maxScore: 100, roundScores: { count: 57 } }),
+    0,
+  );
+  // 6. TimeGuessr with 🏆 rounds (missing breakdown & 🏆 grid)
+  ins.run(
+    6,
+    4,
+    '2026-11-16',
+    'TimeGuessr #1265 — 27,292/50,000\n\n1️⃣ 🏆4,706 · 📅 3y · 🌍 12226.3km\n2️⃣ 🏆3,351 · 📅 21y · 🌍 1651.6km\n3️⃣ 🏆4,448 · 📅 6y · 🌍 4135.0km\n4️⃣ 🏆7,371 · 📅 7y · 🌍 574.7km\n5️⃣ 🏆7,416 · 📅 12y · 🌍 8.3km',
+    'timeguessr',
+    27292,
+    '27,292 / 50,000',
+    '#1265',
+    '[]',
+    JSON.stringify({ emojiGrid: '1️⃣ 📅 3y\n2️⃣ 📅 21y' }),
+    0,
+  );
+
+  await ensureSchema(harness.d1);
+  // Idempotent second pass
+  await ensureSchema(harness.d1);
+
+  const client = harness.createSessionClient();
+  const authHeader = { Cookie: `__Host-dg_session=${rawToken}` };
+
+  const gamesRes = await client.call('/api/games', { headers: authHeader });
+  const fermiGame = gamesRes.json.games.find((g) => g.slug === 'fermi');
+  const magGame = gamesRes.json.games.find((g) => g.slug === 'magnitudle');
+  assert.equal(fermiGame.parserId, 'fermi');
+  assert.equal(magGame.parserId, 'magnitudle');
+
+  assert.equal(
+    harness.sqliteDb.prepare("SELECT parser_id FROM game_catalog WHERE slug = 'fermi'").get().parser_id,
+    'fermi',
+  );
+  assert.equal(
+    harness.sqliteDb.prepare("SELECT parser_id FROM game_catalog WHERE slug = 'magnitudle'").get().parser_id,
+    'magnitudle',
+  );
+  assert.ok(
+    harness.sqliteDb
+      .prepare("SELECT 1 FROM schema_migrations WHERE id = 'fermi_magnitudle_grids_backfill_v1'")
+      .get(),
+  );
+
+  const entriesRes = await client.call('/api/entries', { headers: authHeader });
+  const byId = new Map(entriesRes.json.entries.map((e) => [e.id, e]));
+
+  const f1 = byId.get(1);
+  assert.equal(f1.parserId, 'fermi');
+  assert.equal(f1.primaryValue, 1.3);
+  assert.equal(f1.displayValue, '1.30×');
+  assert.equal(f1.puzzleId, '#113');
+  assert.equal(f1.breakdown.length, 3);
+  assert.equal(f1.metadata.topPercent, 2);
+  assert.ok(f1.metadata.emojiGrid.includes('01 ↑ 1.28×'));
+
+  const f2 = byId.get(2);
+  assert.equal(f2.primaryValue, 27.6);
+  assert.equal(f2.displayValue, '27.6×');
+  assert.equal(f2.puzzleId, '#112');
+
+  const fManual = byId.get(3);
+  assert.equal(fManual.primaryValue, 6.11);
+  assert.equal(fManual.displayValue, '6.11× manual');
+  assert.equal(fManual.puzzleId, '#113');
+  assert.equal(fManual.breakdown.length, 3);
+  assert.equal(fManual.metadata.topPercent, 2);
+  assert.ok(fManual.metadata.emojiGrid.includes('01 ↑ 1.28×'));
+
+  const mRow = byId.get(4);
+  assert.equal(mRow.parserId, 'magnitudle');
+  assert.equal(mRow.breakdown.length, 5);
+  assert.equal(mRow.metadata.maxScore, 500);
+  assert.equal(mRow.metadata.emojiGrid.split('\n').length, 5);
+
+  const pRow = byId.get(5);
+  assert.ok(pRow.metadata.emojiGrid.includes('🔢 Count · 57'));
+
+  const tgRow = byId.get(6);
+  assert.equal(tgRow.breakdown.length, 5);
+  assert.equal(tgRow.breakdown[0].value, 4706);
+  assert.ok(tgRow.metadata.emojiGrid.includes('1️⃣ 🏆4,706'));
 
   harness.sqliteDb.close();
 });

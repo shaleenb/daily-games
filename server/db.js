@@ -407,6 +407,8 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
   const UPGRADE_PARSER_STARTER_SLUGS = new Set([
     'cluesbysam',
     'perceptle',
+    'fermi',
+    'magnitudle',
     'plain',
     'timeguessr',
   ]);
@@ -694,6 +696,205 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
     return updated;
   }
 
+  function backfillAllGameGridsAndFermi() {
+    const rows = sqlite
+      .prepare(`
+        SELECT
+          e.id, e.raw_text, e.parser_id, e.parser_version,
+          e.primary_value, e.display_value, e.puzzle_id,
+          e.breakdown_json, e.metadata_json, e.manual_override,
+          g.slug AS game_slug, g.name AS game_name, g.url AS game_url,
+          g.metric_label, g.metric_format, g.metric_direction, g.parser_id AS game_parser_id
+        FROM entries e
+        JOIN games g ON g.id = e.game_id
+        WHERE TRIM(e.raw_text) != ''
+      `)
+      .all();
+
+    if (rows.length === 0) return 0;
+
+    const updateEntryStmt = sqlite.prepare(`
+      UPDATE entries SET
+        parser_id = ?, parser_version = ?,
+        primary_value = ?, display_value = ?, puzzle_id = ?,
+        breakdown_json = ?, metadata_json = ?
+      WHERE id = ?
+    `);
+    let updated = 0;
+
+    sqlite.exec('BEGIN IMMEDIATE;');
+    try {
+      for (const rawRow of rows) {
+        const r = { ...rawRow };
+        const gameCtx = {
+          slug: String(r.game_slug || ''),
+          name: String(r.game_name || ''),
+          url: String(r.game_url || ''),
+          metricLabel: String(r.metric_label || 'Score'),
+          metricFormat: String(r.metric_format || 'number'),
+          metricDirection: String(r.metric_direction || 'higher_is_better'),
+          parserId: String(r.game_parser_id || 'auto'),
+        };
+        const resolved = serializeResolvedParser(getParserForGame(gameCtx));
+        const parsed = parseForGame(String(r.raw_text ?? ''), gameCtx);
+        if (!parsed || typeof parsed !== 'object') continue;
+
+        const isManual = Boolean(r.manual_override);
+        const isFermi = gameCtx.slug === 'fermi' || resolved.id === 'fermi';
+        const isMagnitudle = gameCtx.slug === 'magnitudle' || resolved.id === 'magnitudle';
+
+        const existingBreakdown = safeJsonParse(r.breakdown_json, []);
+        const existingMeta = safeJsonParse(r.metadata_json, {});
+        const mergedMeta =
+          existingMeta && typeof existingMeta === 'object' && !Array.isArray(existingMeta)
+            ? { ...existingMeta }
+            : {};
+        const parsedMeta = parsed.metadata && typeof parsed.metadata === 'object' ? parsed.metadata : {};
+        const parsedBreakdown = Array.isArray(parsed.breakdown) ? parsed.breakdown : [];
+
+        let nextParserId = String(r.parser_id || 'generic');
+        let nextParserVersion = Number(r.parser_version || 1);
+        let nextPrimaryValue =
+          r.primary_value === null || r.primary_value === undefined ? null : Number(r.primary_value);
+        let nextDisplayValue = r.display_value ?? null;
+        let nextPuzzleId = r.puzzle_id ?? null;
+        let nextBreakdown = Array.isArray(existingBreakdown) ? existingBreakdown : [];
+
+        if (isFermi) {
+          if (!isManual) {
+            nextParserId = String(parsed.parserId || 'fermi');
+            nextParserVersion = Number(parsed.parserVersion || 1);
+            if (parsed.primaryValue !== null && parsed.primaryValue !== undefined) {
+              nextPrimaryValue = Number(parsed.primaryValue);
+              if (parsed.displayValue) {
+                nextDisplayValue = String(parsed.displayValue);
+              }
+            }
+            if (parsed.puzzleId) {
+              nextPuzzleId = String(parsed.puzzleId);
+            }
+            if (parsedBreakdown.length > 0) {
+              nextBreakdown = parsedBreakdown;
+            }
+            if (typeof parsedMeta.emojiGrid === 'string' && parsedMeta.emojiGrid.trim()) {
+              mergedMeta.emojiGrid = parsedMeta.emojiGrid.trim();
+            }
+            if (parsedMeta.topPercent !== undefined && parsedMeta.topPercent !== null) {
+              mergedMeta.topPercent = parsedMeta.topPercent;
+            }
+            if (parsedMeta.percentileLabel) {
+              mergedMeta.percentileLabel = parsedMeta.percentileLabel;
+            }
+          } else {
+            const trimmedPid = typeof nextPuzzleId === 'string' ? nextPuzzleId.trim() : '';
+            if (trimmedPid && !trimmedPid.startsWith('#') && parsed.puzzleId === `#${trimmedPid}`) {
+              nextPuzzleId = parsed.puzzleId;
+            }
+            if (nextBreakdown.length === 0 && parsedBreakdown.length > 0) {
+              nextBreakdown = parsedBreakdown;
+            }
+            for (const key of ['emojiGrid', 'topPercent', 'percentileLabel']) {
+              const cur = mergedMeta[key];
+              const isEmpty = cur === undefined || cur === null || (typeof cur === 'string' && !cur.trim());
+              if (isEmpty && parsedMeta[key] !== undefined && parsedMeta[key] !== null && parsedMeta[key] !== '') {
+                mergedMeta[key] = parsedMeta[key];
+              }
+            }
+          }
+        } else {
+          if (isMagnitudle && !isManual) {
+            nextParserId = String(parsed.parserId || 'magnitudle');
+            nextParserVersion = Number(parsed.parserVersion || 1);
+            if (nextPrimaryValue === null && parsed.primaryValue !== null && parsed.primaryValue !== undefined) {
+              nextPrimaryValue = Number(parsed.primaryValue);
+              if (parsed.displayValue) {
+                nextDisplayValue = String(parsed.displayValue);
+              }
+            }
+            if (!nextPuzzleId && parsed.puzzleId) {
+              nextPuzzleId = String(parsed.puzzleId);
+            }
+          }
+
+          if (nextBreakdown.length === 0 && parsedBreakdown.length > 0) {
+            nextBreakdown = parsedBreakdown;
+          }
+
+          const existingGrid =
+            typeof mergedMeta.emojiGrid === 'string' ? mergedMeta.emojiGrid.trim() : '';
+          const parsedGrid =
+            typeof parsedMeta.emojiGrid === 'string' ? parsedMeta.emojiGrid.trim() : '';
+
+          if (!existingGrid && parsedGrid) {
+            mergedMeta.emojiGrid = parsedGrid;
+          } else if (isMagnitudle && parsedGrid && existingGrid !== parsedGrid) {
+            const existingLines = existingGrid.split(/\r?\n/);
+            const parsedLines = parsedGrid.split(/\r?\n/);
+            if (
+              existingLines.length >= parsedLines.length * 2 &&
+              existingLines.slice(0, parsedLines.length).join('\n') === parsedGrid
+            ) {
+              mergedMeta.emojiGrid = parsedGrid;
+            }
+          } else if (
+            gameCtx.slug === 'timeguessr' &&
+            !isManual &&
+            parsedGrid &&
+            existingGrid &&
+            !existingGrid.includes('🏆') &&
+            parsedGrid.includes('🏆')
+          ) {
+            mergedMeta.emojiGrid = parsedGrid;
+          }
+
+          if (
+            isMagnitudle &&
+            parsedMeta.maxScore !== undefined &&
+            parsedMeta.maxScore !== null &&
+            (mergedMeta.maxScore === undefined || (!isManual && mergedMeta.maxScore !== parsedMeta.maxScore))
+          ) {
+            mergedMeta.maxScore = parsedMeta.maxScore;
+          }
+        }
+
+        const nextBreakdownJson = JSON.stringify(nextBreakdown);
+        const nextMetaJson = JSON.stringify(mergedMeta);
+        const changed =
+          nextParserId !== String(r.parser_id || 'generic') ||
+          nextParserVersion !== Number(r.parser_version || 1) ||
+          nextPrimaryValue !== (r.primary_value === null || r.primary_value === undefined ? null : Number(r.primary_value)) ||
+          nextDisplayValue !== (r.display_value ?? null) ||
+          nextPuzzleId !== (r.puzzle_id ?? null) ||
+          nextBreakdownJson !== String(r.breakdown_json ?? '[]') ||
+          nextMetaJson !== String(r.metadata_json ?? '{}');
+
+        if (changed) {
+          updateEntryStmt.run(
+            nextParserId,
+            nextParserVersion,
+            nextPrimaryValue,
+            nextDisplayValue,
+            nextPuzzleId,
+            nextBreakdownJson,
+            nextMetaJson,
+            Number(r.id),
+          );
+          updated += 1;
+        }
+      }
+      sqlite.exec('COMMIT;');
+    } catch (err) {
+      try {
+        sqlite.exec('ROLLBACK;');
+      } catch {
+        // ignore rollback failure
+      }
+      throw err;
+    }
+
+    return updated;
+  }
+
   function migrateLegacySchema() {
     const gameCols = new Set(
       sqlite.prepare('PRAGMA table_info(games)').all().map((c) => c.name),
@@ -896,6 +1097,12 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
     sqlite.exec(
       "UPDATE game_catalog SET parser_id = 'perceptle' WHERE slug = 'perceptle' AND parser_id = 'auto';",
     );
+    sqlite.exec(
+      "UPDATE game_catalog SET parser_id = 'fermi' WHERE slug = 'fermi' AND parser_id = 'auto';",
+    );
+    sqlite.exec(
+      "UPDATE game_catalog SET parser_id = 'magnitudle' WHERE slug = 'magnitudle' AND parser_id = 'auto';",
+    );
 
     const existingGameRows = sqlite
       .prepare('SELECT * FROM games ORDER BY CASE WHEN user_id IS NOT NULL THEN 0 ELSE 1 END, id ASC')
@@ -937,6 +1144,24 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       );
       backfillPerceptleEntries();
       markMigrationStmt.run(perceptleMigrationId, now);
+    }
+
+    const fermiMagnitudleMigrationId = 'fermi_magnitudle_grids_backfill_v1';
+    if (!hasMigrationStmt.get(fermiMagnitudleMigrationId)) {
+      sqlite.exec(
+        "UPDATE games SET parser_id = 'fermi' WHERE slug = 'fermi' AND parser_id = 'auto';",
+      );
+      sqlite.exec(
+        "UPDATE games SET parser_id = 'magnitudle' WHERE slug = 'magnitudle' AND parser_id = 'auto';",
+      );
+      sqlite.exec(
+        "UPDATE game_catalog SET parser_id = 'fermi' WHERE slug = 'fermi' AND parser_id = 'auto';",
+      );
+      sqlite.exec(
+        "UPDATE game_catalog SET parser_id = 'magnitudle' WHERE slug = 'magnitudle' AND parser_id = 'auto';",
+      );
+      backfillAllGameGridsAndFermi();
+      markMigrationStmt.run(fermiMagnitudleMigrationId, now);
     }
   }
 

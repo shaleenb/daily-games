@@ -4,6 +4,8 @@ import {
   cluesBySamParser,
   normalizeDifficultyLabel,
 } from './games/cluesbysam.js';
+import { fermiParser } from './games/fermi.js';
+import { magnitudleParser } from './games/magnitudle.js';
 import { PERCEPTLE_ROUNDS, perceptleParser } from './games/perceptle.js';
 import { plainParser } from './games/plain.js';
 import { timeguessrParser } from './games/timeguessr.js';
@@ -12,6 +14,7 @@ import {
   COMMON_RESET_TIMEZONES,
   compactSlug,
   extractDomain,
+  extractEmojiGrid,
   formatCountdownCompact,
   formatDurationSeconds,
   formatMetricValue,
@@ -25,6 +28,8 @@ import {
 
 export const PARSERS = [
   cluesBySamParser,
+  fermiParser,
+  magnitudleParser,
   perceptleParser,
   plainParser,
   timeguessrParser,
@@ -40,6 +45,7 @@ export {
   slugify,
   compactSlug,
   extractDomain,
+  extractEmojiGrid,
   getLocalDateString,
   parseDurationSeconds,
   formatDurationSeconds,

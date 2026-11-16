@@ -1,4 +1,5 @@
 import { STARTER_GAMES } from '../shared/auth-crypto.js';
+import { extractEmojiGrid } from '../shared/parsers/utils.js';
 import {
   CLUES_BY_SAM_DIFFICULTIES,
   normalizeDifficultyLabel,
@@ -786,8 +787,6 @@ export function computeGameStats(
   };
 }
 
-const GRID_SYMBOL_REGEX = /[\p{Extended_Pictographic}\u2B1B\u2B1C\u2B50\u2705\u274C\u2B55]/gu;
-
 export function extractShareGrid(entry) {
   if (typeof entry?.metadata?.emojiGrid === 'string' && entry.metadata.emojiGrid.trim()) {
     return entry.metadata.emojiGrid.trim();
@@ -795,50 +794,8 @@ export function extractShareGrid(entry) {
   if (typeof entry?.rawText !== 'string' || !entry.rawText.trim()) {
     return null;
   }
-
-  const lines = entry.rawText.split(/\r?\n/);
-  const blocks = [];
-  let currentBlock = [];
-
-  const flushBlock = () => {
-    if (currentBlock.length >= 2) {
-      blocks.push(currentBlock);
-    } else if (currentBlock.length === 1) {
-      const syms = currentBlock[0].match(GRID_SYMBOL_REGEX);
-      if (syms && syms.length >= 3) {
-        blocks.push(currentBlock);
-      }
-    }
-    currentBlock = [];
-  };
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      flushBlock();
-      continue;
-    }
-    if (/https?:\/\//i.test(trimmed) || /[a-z]/i.test(trimmed)) {
-      flushBlock();
-      continue;
-    }
-    const syms = trimmed.match(GRID_SYMBOL_REGEX);
-    if (syms && syms.length >= 2) {
-      currentBlock.push(trimmed);
-    } else {
-      flushBlock();
-    }
-  }
-  flushBlock();
-
-  if (blocks.length === 0) return null;
-  let best = blocks[0];
-  for (let i = 1; i < blocks.length; i += 1) {
-    if (blocks[i].length > best.length) {
-      best = blocks[i];
-    }
-  }
-  return best.join('\n');
+  const grid = extractEmojiGrid(entry.rawText);
+  return grid && grid.trim() ? grid.trim() : null;
 }
 
 function compareAverageNullable(aVal, bVal, metricDirection) {

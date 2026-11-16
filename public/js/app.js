@@ -13,6 +13,7 @@ import {
   PARSERS,
   PERCEPTLE_ROUNDS,
   detectGameAndParse,
+  extractEmojiGrid,
   formatCountdownCompact,
   formatDurationSeconds,
   formatMetricValue,
@@ -1346,6 +1347,14 @@ function renderRoundChipsHtml(breakdown, { compact = false } = {}) {
     .join('');
 }
 
+function getEntryShareGrid(item) {
+  const fromMeta =
+    typeof item?.metadata?.emojiGrid === 'string' ? item.metadata.emojiGrid.trim() : '';
+  if (fromMeta) return fromMeta;
+  const raw = typeof item?.rawText === 'string' ? item.rawText : '';
+  return raw ? extractEmojiGrid(raw) || '' : '';
+}
+
 function renderCompletedTicket(game, entry) {
   const color = normalizeHexColor(game.color);
   const onColor = getReadableTextColor(color);
@@ -1355,7 +1364,7 @@ function renderCompletedTicket(game, entry) {
   const isDnf = entry.solved === false;
   const isJustStamped = state.justStampedGameId === game.id;
   const safeUrl = isSafeHttpUrl(game.url);
-  const emojiGrid = entry.metadata?.emojiGrid;
+  const emojiGrid = getEntryShareGrid(entry);
   const liveToday = isLiveTodayMode();
   const puzzleStatus = liveToday ? getLivePuzzleStatus(game) : null;
   const difficulty = getEntryDifficulty(entry);
@@ -1587,6 +1596,7 @@ function buildParsePreviewHtml(parsed, game, { emptyHint = 'Waiting for pasted r
     parsed.breakdown,
     parsed.parserId || game?.resolvedParser?.id || game?.parserId
   );
+  const previewGrid = getEntryShareGrid(parsed);
 
   return `
     <div class="preview-badges-row">${badges.join('')}</div>
@@ -1595,6 +1605,11 @@ function buildParsePreviewHtml(parsed, game, { emptyHint = 'Waiting for pasted r
       <span class="preview-score-strong tabular-nums">${escapeHtml(displayStr)}</span>
       ${datePill}
     </div>
+    ${
+      previewGrid
+        ? `<pre class="share-grid-pre preview-grid-pre">${escapeHtml(previewGrid)}</pre>`
+        : ''
+    }
     ${
       showRounds
         ? `<div class="round-breakdown-pills">${renderRoundChipsHtml(parsed.breakdown, { compact: false })}</div>`
@@ -2934,14 +2949,18 @@ function renderGameTodayCellHtml(cell) {
   const lockBadge = cell.spoilerProtected
     ? '<span class="matrix-spoiler-lock" title="Play today\'s puzzle to unlock share grid" aria-label="Spoiler protected">🔒</span>'
     : '';
+  const gridHtml = cell.emojiGrid
+    ? `<details class="share-grid-details matrix-grid-details"><summary>Grid</summary><pre class="share-grid-pre">${escapeHtml(cell.emojiGrid)}</pre></details>`
+    : '';
   return `
-    <span class="matrix-cell-top">
+    <div class="matrix-cell-top">
       <strong class="tabular-nums">${escapeHtml(scoreStr)}</strong>
       ${medal ? `<span>${medal}</span>` : ''}
       ${diffBadge}
       ${dnfBadge}
       ${lockBadge}
-    </span>
+    </div>
+    ${gridHtml}
   `;
 }
 
@@ -3850,6 +3869,7 @@ function renderStatsGameDetail() {
             entry.breakdown,
             entry.parserId || game.resolvedParser?.id || game.parserId
           );
+          const historyGrid = getEntryShareGrid(entry);
           const snippet = entry.notes || entry.rawText?.split('\n')[0] || '';
           return `
             <tr data-entry-id="${escapeHtml(entry.id)}">
@@ -3867,6 +3887,11 @@ function renderStatsGameDetail() {
                 ${
                   showRoundChips
                     ? `<div class="history-rounds-strip">${renderRoundChipsHtml(entry.breakdown, { compact: true })}</div>`
+                    : ''
+                }
+                ${
+                  historyGrid
+                    ? `<details class="share-grid-details history-grid-details"><summary>Grid</summary><pre class="share-grid-pre">${escapeHtml(historyGrid)}</pre></details>`
                     : ''
                 }
               </td>

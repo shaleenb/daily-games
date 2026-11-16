@@ -3,7 +3,7 @@ import { extractEmojiGrid, extractExplicitDate, extractPuzzleId } from '../utils
 const TIMEGUESSR_URL_REGEX = /\btimeguessr\.com\b/i;
 const TIMEGUESSR_HEADER_REGEX = /\btimeguessr\s+#?(\d[\d,]*)(?![\d,])/i;
 const ROUND_SCORE_REGEX =
-  /^(?:round\s*(\d+)(?![\d,])|([1-9])\uFE0F?\u20E3)(?:[ \t]*[:=\-–—][ \t]*|[ \t]+)(\d[\d,]*)(?:[ \t]*\/[ \t]*(\d[\d,]*))?/gim;
+  /^(?:round\s*(\d+)(?![\d,])|([1-9])\uFE0F?\u20E3)(?:[ \t]*[:=\-–—][ \t]*|[ \t]+)(?:[🏆🥇🥈🥉🎖🏅]\uFE0F?[ \t]*)?(\d[\d,]*)(?:[ \t]*\/[ \t]*(\d[\d,]*))?/gimu;
 
 function parseCleanInt(token) {
   if (!token) return null;
@@ -31,8 +31,13 @@ function extractTimeguessrEmojiSummary(rawText) {
   const lines = rawText.split(/\r?\n/);
   const emojiLines = [];
   for (const rawLine of lines) {
-    if (!/[🌎🌍🌏📅🟩🟨⬛⬜🟥🟧🟦]/u.test(rawLine)) continue;
-    const stripped = rawLine
+    if (!/[🌎🌍🌏📅🏆🟩🟨⬛⬜🟥🟧🟦]/u.test(rawLine)) continue;
+    const trimmed = rawLine.trim();
+    if (/[🏆📅🌍🌎🌏]/u.test(trimmed) && /^[1-9]\uFE0F?\u20E3/u.test(trimmed)) {
+      emojiLines.push(trimmed);
+      continue;
+    }
+    const stripped = trimmed
       .replace(/^(?:round\s*\d+|[1-9]\uFE0F?\u20E3)\s*[:=\-–—]?\s*/i, '')
       .trim();
     const tiles = stripped.match(/[\p{Extended_Pictographic}\u2B1B\u2B1C]/gu);
@@ -118,7 +123,7 @@ export const timeguessrParser = {
         .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ')
         .replace(/\b\d{1,4}\/\d{1,2}\/\d{2,4}\b/g, ' ')
         .replace(/\btimeguessr\s+#?\d[\d,]*/gi, ' ')
-        .replace(ROUND_SCORE_REGEX, ' ')
+        .replace(/^(?:round\s*\d+|[1-9]\uFE0F?\u20E3).*$/gimu, ' ')
         .replace(/(^|[\s(])#\d[\d,]*/gm, '$1 ');
 
       const ratioMatch = /\b(\d[\d,]*)\s*\/\s*(\d[\d,]*)\b/.exec(nonRoundText);

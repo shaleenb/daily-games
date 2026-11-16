@@ -1752,13 +1752,31 @@
     border-radius: var(--radius-sm);
     background: var(--surface-2);
     border: 1.5px solid var(--border);
-    font-family: var(--font-mono);
+    font-family: var(--font-mono), 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', monospace;
     font-size: 0.78rem;
-    line-height: 1.35;
-    white-space: pre-wrap;
-    word-break: break-word;
+    line-height: 1.38;
+    white-space: pre;
+    max-width: 100%;
     max-height: 170px;
     overflow: auto;
+  }
+
+  .preview-grid-pre {
+    margin-top: 0.35rem;
+    background: var(--surface);
+    font-size: 0.75rem;
+    max-height: 140px;
+  }
+
+  .history-grid-details {
+    margin-top: 0.28rem;
+  }
+
+  .history-grid-details .share-grid-pre {
+    font-size: 0.7rem;
+    padding: 0.36rem 0.48rem;
+    max-height: 120px;
+    max-width: min(320px, 100%);
   }
 
   /* ========================================================================
@@ -1933,6 +1951,7 @@
     font-size: 0.68rem;
     padding: 0.35rem 0.45rem;
     max-height: 110px;
+    max-width: min(260px, 100%);
   }
 
   .matrix-add-btn {

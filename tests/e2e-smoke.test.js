@@ -280,6 +280,7 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
   });
   assert.equal(detectFermi.status, 200);
   assert.equal(detectFermi.json.matchedGame?.id, fermiGame.id);
+  assert.equal(detectFermi.json.parserId, 'fermi');
   assert.equal(detectFermi.json.parsed.primaryValue, 1.62);
   assert.equal(detectFermi.json.parsed.puzzleId, '#42');
 
@@ -353,7 +354,7 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
       playDate: '2026-11-15',
       rawText: 'Fermi #42 - 1.62×',
       expectedValue: 1.62,
-      expectedDisplay: '1.62',
+      expectedDisplay: '1.62×',
     },
     {
       gameId: magnitudleGame.id,

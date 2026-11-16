@@ -273,6 +273,10 @@ export const perceptleParser = {
     }
     if (emojiGrid) {
       metadata.emojiGrid = emojiGrid;
+    } else if (breakdown.length > 0) {
+      metadata.emojiGrid = breakdown
+        .map((item) => `${item.label} · ${item.display}`)
+        .join('\n');
     }
 
     return {

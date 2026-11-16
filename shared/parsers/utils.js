@@ -202,23 +202,65 @@ export function extractExplicitDate(text) {
 }
 
 /**
- * Extract #puzzleId (e.g. "#142", "#1,234" -> "#1234") outside of URLs.
+ * Extract puzzle ID (e.g. "#142", "#1,234" -> "#1234", "No. 113" -> "#113") outside of URLs.
  */
 export function extractPuzzleId(text) {
   if (typeof text !== 'string' || !text) return null;
   const withoutUrls = text.replace(/https?:\/\/\S+/gi, ' ');
-  const match = /(?:^|[\s(])#(\d[\d,]*)(?=$|[\s).,!?:;])/m.exec(withoutUrls);
-  if (!match) return null;
-  return `#${match[1].replace(/,/g, '')}`;
+  const hashMatch = /(?:^|[\s(])#(\d[\d,]*)(?=$|[\s).,!?:;])/m.exec(withoutUrls);
+  if (hashMatch) {
+    return `#${hashMatch[1].replace(/,/g, '')}`;
+  }
+  const namedMatch = /\b(?:no\.?|puzzle)[ \t]*(\d[\d,]*)(?=$|[\s).,!?:;])/im.exec(withoutUrls);
+  if (namedMatch) {
+    return `#${namedMatch[1].replace(/,/g, '')}`;
+  }
+  return null;
+}
+
+const PURE_EMOJI_SYMBOL_REGEX = /[\p{Extended_Pictographic}\u2B1B\u2B1C\u2B50\u2705\u274C\u2B55]/gu;
+const PURE_EMOJI_STRIP_REGEX =
+  /[\p{Extended_Pictographic}\u2B1B\u2B1C\u2B50\u2705\u274C\u2B55\uFE0F\u200D\s]/gu;
+
+const KEYCAP_TOKEN_REGEX = /[0-9#*]\uFE0F?\u20E3/gu;
+const VISUAL_TOKEN_REGEX =
+  /[0-9#*]\uFE0F?\u20E3|[\p{Extended_Pictographic}\u2B1B\u2B1C\u2B50\u2705\u274C\u2B55\u2702\u2190-\u21FF\u2B05-\u2B07\u27A1]/gu;
+const URL_OR_DOMAIN_REGEX = /https?:\/\/|\b[a-z0-9-]+\.(?:com|org|net|io|gg|app|fun|dev|co)\b/i;
+
+function isHybridGridLine(line) {
+  if (!line || line.length > 100) return false;
+  if (URL_OR_DOMAIN_REGEX.test(line)) return false;
+  if (/#[a-z]/i.test(line) || /\bstreak\b/i.test(line)) return false;
+
+  const visualTokens = line.match(VISUAL_TOKEN_REGEX);
+  if (!visualTokens || visualTokens.length < 2) return false;
+
+  // Strip visual tokens (keycaps first so '1️⃣' is not counted as digit '1')
+  const nonVisual = line
+    .replace(KEYCAP_TOKEN_REGEX, ' ')
+    .replace(VISUAL_TOKEN_REGEX, ' ')
+    .replace(/[\uFE0F\u200D]/g, '');
+
+  // Hybrid lines must include at least one numeric/metric token
+  if (!/\d/.test(nonVisual)) return false;
+
+  // Reject prose sentences (e.g. "Top 41% today · 🔥 2-day streak" or "I solved...")
+  // Strip numeric+unit tokens (e.g. "3y", "12226.3km", "6,420m") before counting ASCII words
+  const withoutNumericUnits = nonVisual.replace(/\d[\d.,]*(?:[a-z]+)?/gi, ' ');
+  const words = withoutNumericUnits.match(/[a-z]+/gi) || [];
+  if (words.length > 2) return false;
+  if (words.some((w) => w.length > 12)) return false;
+
+  return true;
 }
 
 /**
- * Extract lines representing an emoji share grid (Wordle squares, status pips, etc.).
+ * Extract lines representing an emoji share grid (pure emoji grids or hybrid tile+metric grids).
  */
 export function extractEmojiGrid(text) {
   if (typeof text !== 'string' || !text) return '';
   const lines = text.split(/\r?\n/);
-  const gridLines = [];
+  const pureGridLines = [];
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -230,26 +272,58 @@ export function extractEmojiGrid(text) {
     if (!stripped) continue;
 
     // Count pictographic / game-tile symbols
-    const symbols = stripped.match(/[\p{Extended_Pictographic}\u2B1B\u2B1C\u2B50\u2705\u274C\u2B55]/gu);
+    const symbols = stripped.match(PURE_EMOJI_SYMBOL_REGEX);
     if (!symbols || symbols.length < 2) continue;
 
     // Ensure the line consists exclusively of pictographs, variation selectors, ZWJ, and whitespace
-    const remainder = line
-      .replace(/[\p{Extended_Pictographic}\u2B1B\u2B1C\u2B50\u2705\u274C\u2B55\uFE0F\u200D\s]/gu, '');
+    const remainder = line.replace(PURE_EMOJI_STRIP_REGEX, '');
     if (remainder.length === 0) {
-      gridLines.push(line);
+      pureGridLines.push(line);
     }
   }
 
-  // Require at least 2 rows, or 1 row of >= 3 emojis (e.g., 1-row share bar like 🟩🟩🟩🟩🟩 or ✅✅❌✅)
-  if (gridLines.length === 1) {
-    const symbols = gridLines[0].match(/[\p{Extended_Pictographic}\u2B1B\u2B1C\u2B50\u2705\u274C\u2B55]/gu);
-    if (!symbols || symbols.length < 3) {
-      return '';
+  // Require at least 2 pure rows, or 1 pure row of >= 3 emojis (e.g., 1-row share bar like 🟩🟩🟩🟩🟩)
+  if (pureGridLines.length >= 2) {
+    return pureGridLines.join('\n');
+  }
+  if (pureGridLines.length === 1) {
+    const symbols = pureGridLines[0].match(PURE_EMOJI_SYMBOL_REGEX);
+    if (symbols && symbols.length >= 3) {
+      return pureGridLines[0];
     }
   }
 
-  return gridLines.join('\n');
+  // Fallback: match multi-line hybrid tile+metric grids (e.g. "🟥🟥⬜⬜⬜ 39", "1️⃣ 🏆4,706 · 📅 3y · 🌍 12226.3km")
+  const hybridRuns = [];
+  let currentRun = [];
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (currentRun.length >= 2) {
+        hybridRuns.push(currentRun);
+      }
+      currentRun = [];
+      continue;
+    }
+    if (isHybridGridLine(line)) {
+      currentRun.push(line);
+    } else {
+      if (currentRun.length >= 2) {
+        hybridRuns.push(currentRun);
+      }
+      currentRun = [];
+    }
+  }
+  if (currentRun.length >= 2) {
+    hybridRuns.push(currentRun);
+  }
+
+  if (hybridRuns.length > 0) {
+    // Prefer the first multi-line hybrid run (avoiding duplicate copies on double-pasted blocks)
+    return hybridRuns[0].join('\n');
+  }
+
+  return '';
 }
 
 export const COMMON_RESET_TIMEZONES = [

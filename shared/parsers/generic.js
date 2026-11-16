@@ -124,13 +124,38 @@ function tryExtractLabeledScore(scanText) {
     }
   }
 
+  // "1.30× score", "27.6× score", "840 score"
+  const suffixScoreMatch =
+    /(?<![a-z0-9.:#])\b(\d[\d,]*(?:\.\d+)?)(?:\s*\/\s*(\d[\d,]*(?:\.\d+)?))?(?:[ \t]*[×x])?[ \t]+score\b/i.exec(
+      scanText
+    );
+  if (suffixScoreMatch) {
+    const num = parseCleanNumber(suffixScoreMatch[1]);
+    if (num !== null) {
+      const den = suffixScoreMatch[2] ? parseCleanNumber(suffixScoreMatch[2]) : null;
+      if (den !== null && den > 0) {
+        return {
+          primaryValue: num,
+          displayValue: `${formatMetricValue(num, 'number')}/${formatMetricValue(den, 'number')}`,
+          detectedFormat: 'number',
+          maxScore: den,
+        };
+      }
+      return {
+        primaryValue: num,
+        displayValue: formatMetricValue(num, 'number'),
+        detectedFormat: 'number',
+      };
+    }
+  }
+
   return null;
 }
 
 function tryExtractMultiplierScore(scanText) {
   // Fermi-style multiplier scores: "1.45×", "2.3x", "Fermi #42 - 1.62×"
   const match =
-    /(?<![a-z0-9.:#])(\d[\d,]*(?:\.\d+)?)(?:\s*×|x)(?![a-z0-9]|\s*\d)/i.exec(scanText);
+    /(?<![a-z0-9.:#])(\d[\d,]*(?:\.\d+)?)(?:\s*×|x)(?![a-z0-9]|[ \t]*\d)/i.exec(scanText);
   if (!match) return null;
   const num = parseCleanNumber(match[1]);
   if (num === null) return null;

@@ -8,6 +8,7 @@ import {
   slugify,
   compactSlug,
   extractDomain,
+  extractEmojiGrid,
   getLocalDateString,
   parseDurationSeconds,
   formatDurationSeconds,
@@ -28,10 +29,13 @@ import {
   detectGameAndParse,
 } from '../shared/parsers/registry.js';
 import { cluesBySamParser } from '../shared/parsers/games/cluesbysam.js';
+import { fermiParser } from '../shared/parsers/games/fermi.js';
+import { magnitudleParser } from '../shared/parsers/games/magnitudle.js';
 import { perceptleParser } from '../shared/parsers/games/perceptle.js';
 import { plainParser } from '../shared/parsers/games/plain.js';
 import { timeguessrParser } from '../shared/parsers/games/timeguessr.js';
 import { wordleParser } from '../shared/parsers/games/wordle.js';
+import { extractPuzzleId } from '../shared/parsers/utils.js';
 import { STARTER_GAMES } from '../shared/auth-crypto.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -477,7 +481,7 @@ test('registry: detectGameAndParse matches custom parsers, domains, names, compa
   assert.equal(unmatched.parsed.primaryValue, 750);
 });
 
-test('GENERIC_PARSER: extracts Fermi-style multiplier scores while ignoring grid dimensions', () => {
+test('GENERIC_PARSER: extracts multiplier and suffix scores while ignoring grid dimensions', () => {
   const plainUnicode = GENERIC_PARSER.parse('1.45×', {
     metricFormat: 'number',
     metricDirection: 'lower_is_better',
@@ -496,14 +500,22 @@ test('GENERIC_PARSER: extracts Fermi-style multiplier scores while ignoring grid
   assert.equal(labeledAvg.primaryValue, 1.8);
   assert.equal(labeledAvg.displayValue, '1.8');
 
-  const fermiShare = GENERIC_PARSER.parse('Fermi #42 - 1.62×\nhttps://fermi.gg');
-  assert.equal(fermiShare.puzzleId, '#42');
-  assert.equal(fermiShare.primaryValue, 1.62);
-  assert.equal(fermiShare.displayValue, '1.62');
+  const suffixScore = GENERIC_PARSER.parse('1.30× score · top 2%');
+  assert.equal(suffixScore.primaryValue, 1.3);
+  assert.equal(suffixScore.displayValue, '1.3');
 
-  const fermiWithGrid = GENERIC_PARSER.parse('Fermi #42 (4x4)\n1.62×');
-  assert.equal(fermiWithGrid.puzzleId, '#42');
-  assert.equal(fermiWithGrid.primaryValue, 1.62);
+  const multilineMult = GENERIC_PARSER.parse('1.28×\n02 next');
+  assert.equal(multilineMult.primaryValue, 1.28);
+  assert.equal(multilineMult.displayValue, '1.28');
+
+  const genericMultShare = GENERIC_PARSER.parse('Multiplier #42 - 1.62×\nhttps://multiplier.example');
+  assert.equal(genericMultShare.puzzleId, '#42');
+  assert.equal(genericMultShare.primaryValue, 1.62);
+  assert.equal(genericMultShare.displayValue, '1.62');
+
+  const multWithGrid = GENERIC_PARSER.parse('Multiplier #42 (4x4)\n1.62×');
+  assert.equal(multWithGrid.puzzleId, '#42');
+  assert.equal(multWithGrid.primaryValue, 1.62);
 
   for (const gridOnly of ['Grid 4x4\nPlayed', '5x5 puzzle', '4×4 board', '4 x 4 grid']) {
     const res = GENERIC_PARSER.parse(gridOnly);
@@ -880,6 +892,14 @@ test('STARTER_GAMES & detectGameAndParse: includes 9 starter games including Pla
   assert.equal(perceptleStarter.parserId, 'perceptle');
   assert.equal(perceptleStarter.sortOrder, 4);
 
+  const fermiStarter = STARTER_GAMES.find((g) => g.slug === 'fermi');
+  assert.equal(fermiStarter.parserId, 'fermi');
+  assert.equal(fermiStarter.sortOrder, 6);
+
+  const magnitudleStarter = STARTER_GAMES.find((g) => g.slug === 'magnitudle');
+  assert.equal(magnitudleStarter.parserId, 'magnitudle');
+  assert.equal(magnitudleStarter.sortOrder, 7);
+
   const plainStarter = STARTER_GAMES.find((g) => g.slug === 'plain');
   assert.equal(plainStarter.parserId, 'plain');
   assert.equal(plainStarter.sortOrder, 8);
@@ -926,6 +946,26 @@ test('STARTER_GAMES & detectGameAndParse: includes 9 starter games including Pla
   assert.equal(detectedPerceptle.parserId, 'perceptle');
   assert.equal(detectedPerceptle.parsed.primaryValue, 69);
   assert.equal(detectedPerceptle.parsed.displayValue, '69 (C)');
+
+  const detectedFermi = detectGameAndParse(
+    'Fermi · No. 113\n01 ↑ 1.28×\n02 ↓ 1.42×\n03 ↓ 1.19×\n─────────\n1.30× score · top 2%\n<https://fermi.gg/s/daily>',
+    starterWithIds
+  );
+  assert.equal(detectedFermi.matchedGame?.slug, 'fermi');
+  assert.equal(detectedFermi.confidence, 'high');
+  assert.equal(detectedFermi.parserId, 'fermi');
+  assert.equal(detectedFermi.parsed.primaryValue, 1.3);
+  assert.equal(detectedFermi.parsed.displayValue, '1.30×');
+
+  const detectedMagnitudle = detectGameAndParse(
+    'Size It Up\n#99\n\nScore: 116/500\n\n🟥🟥⬜⬜⬜ 39\n🟥🟥🟥⬜⬜ 53\nhttps://magnitudle.com/size-it-up',
+    starterWithIds
+  );
+  assert.equal(detectedMagnitudle.matchedGame?.slug, 'magnitudle');
+  assert.equal(detectedMagnitudle.confidence, 'high');
+  assert.equal(detectedMagnitudle.parserId, 'magnitudle');
+  assert.equal(detectedMagnitudle.parsed.primaryValue, 116);
+  assert.equal(detectedMagnitudle.parsed.displayValue, '116/500');
 });
 
 test('perceptleParser: PERCEPTLE_ROUNDS, share formats, variation selectors, fallbacks, and registry matching', () => {
@@ -993,6 +1033,10 @@ test('perceptleParser: PERCEPTLE_ROUNDS, share formats, variation selectors, fal
     max: 100,
     display: '93',
   });
+  assert.equal(
+    res1.metadata.emojiGrid,
+    '🔢 Count · 57\n🎯 Track · 93\n📐 Angle · 100\n🥁 Tempo · 3\n✂️ Split · 93'
+  );
 
   // 2. Variation selector stripped ("✂ 93") + alternative headers
   const strippedSplit = 'Perceptle #123: B+ (84)\n🔢 80  🎯 85  📐 90  🥁 72  ✂ 93';
@@ -1069,4 +1113,226 @@ test('perceptleParser: PERCEPTLE_ROUNDS, share formats, variation selectors, fal
   assert.equal(perceptleParser.canParse('🔢 57  🎯 93  📐 100'), true);
   assert.equal(perceptleParser.canParse('https://theperceptle.com\nScore: 85'), true);
   assert.equal(perceptleParser.canParse('Wordle 1,234 4/6'), false);
+});
+
+test('fermiParser: extracts summary score (1.30× vs 1.19), rounds, percentile, puzzleId, and monospace grid', () => {
+  assert.equal(getParserById('fermi'), fermiParser);
+  assert.equal(
+    getParserForGame({ name: 'Fermi', slug: 'fermi', url: 'https://fermi.gg', parserId: 'auto' }),
+    fermiParser
+  );
+  assert.equal(
+    getParserForGame({ name: 'Fermi', slug: 'fermi', parserId: 'fermi' }),
+    fermiParser
+  );
+
+  const realShare = [
+    'Fermi · No. 113',
+    '01 ↑ 1.28×',
+    '02 ↓ 1.42×',
+    '03 ↓ 1.19×',
+    '─────────',
+    '1.30× score · top 2%',
+    '<https://fermi.gg/s/daily>',
+  ].join('\n');
+
+  assert.equal(fermiParser.canParse(realShare), true);
+  const res = fermiParser.parse(realShare);
+  assert.equal(res.parserId, 'fermi');
+  assert.equal(res.isCustomParser, true);
+  assert.equal(res.puzzleId, '#113');
+  assert.equal(res.primaryValue, 1.3);
+  assert.equal(res.displayValue, '1.30×');
+  assert.equal(res.metricLabel, 'Avg Multiplier');
+  assert.equal(res.metricFormat, 'number');
+  assert.equal(res.metricDirection, 'lower_is_better');
+  assert.equal(res.metadata.topPercent, 2);
+  assert.equal(res.metadata.percentileLabel, 'top 2%');
+  assert.equal(res.breakdown.length, 3);
+  assert.deepEqual(res.breakdown[0], {
+    key: 'q1',
+    icon: '↑',
+    name: 'Q1',
+    label: '01 ↑',
+    value: 1.28,
+    display: '1.28×',
+  });
+  assert.deepEqual(res.breakdown[2], {
+    key: 'q3',
+    icon: '↓',
+    name: 'Q3',
+    label: '03 ↓',
+    value: 1.19,
+    display: '1.19×',
+  });
+  assert.equal(
+    res.metadata.emojiGrid,
+    '01 ↑ 1.28×\n02 ↓ 1.42×\n03 ↓ 1.19×\n─────────\n1.30× · top 2%'
+  );
+
+  const slashSample = '01 ↑ 64.1× / 02 ↑ 2.46× / 03 ↑ 134× / ───────── / 27.6× score · top 89%';
+  assert.equal(fermiParser.canParse(slashSample), true);
+  const slashRes = fermiParser.parse(slashSample);
+  assert.equal(slashRes.primaryValue, 27.6);
+  assert.equal(slashRes.displayValue, '27.6×');
+  assert.equal(slashRes.metadata.topPercent, 89);
+  assert.equal(slashRes.breakdown.length, 3);
+
+  const summaryOnly = fermiParser.parse('Fermi\n6.11× score · top 44%');
+  assert.equal(summaryOnly.primaryValue, 6.11);
+  assert.equal(summaryOnly.displayValue, '6.11×');
+  assert.equal(summaryOnly.metadata.topPercent, 44);
+
+  const synthetic = fermiParser.parse('Fermi #42 - 1.62×');
+  assert.equal(synthetic.puzzleId, '#42');
+  assert.equal(synthetic.primaryValue, 1.62);
+  assert.equal(synthetic.displayValue, '1.62×');
+
+  const roundsOnly = fermiParser.parse('01 ↑ 1.00×\n02 ↓ 4.00×');
+  assert.equal(roundsOnly.primaryValue, 2);
+  assert.equal(roundsOnly.displayValue, '2.00×');
+  assert.equal(roundsOnly.breakdown.length, 2);
+});
+
+test('magnitudleParser: parses Size It Up / Magnitudle scores, rows, and deduplicates double pastes', () => {
+  assert.equal(getParserById('magnitudle'), magnitudleParser);
+  assert.equal(
+    getParserForGame({
+      name: 'Magnitudle',
+      slug: 'magnitudle',
+      url: 'https://magnitudle.com',
+      parserId: 'auto',
+    }),
+    magnitudleParser
+  );
+  assert.equal(
+    getParserForGame({ name: 'Size It Up', slug: 'size-it-up', parserId: 'auto' }),
+    magnitudleParser
+  );
+
+  const singleShare = [
+    'Size It Up',
+    '#99',
+    '',
+    'Score: 116/500',
+    '',
+    '🟥🟥⬜⬜⬜ 39',
+    '🟥🟥🟥⬜⬜ 53',
+    '⬜⬜⬜⬜⬜ 4',
+    '⬜⬜⬜⬜⬜ 0',
+    '🟥⬜⬜⬜⬜ 20',
+    'https://magnitudle.com/size-it-up',
+  ].join('\n');
+
+  assert.equal(magnitudleParser.canParse(singleShare), true);
+  const res = magnitudleParser.parse(singleShare);
+  assert.equal(res.parserId, 'magnitudle');
+  assert.equal(res.isCustomParser, true);
+  assert.equal(res.puzzleId, '#99');
+  assert.equal(res.primaryValue, 116);
+  assert.equal(res.displayValue, '116/500');
+  assert.equal(res.metadata.maxScore, 500);
+  assert.equal(res.breakdown.length, 5);
+  assert.deepEqual(res.breakdown[0], {
+    key: 'r1',
+    label: 'Round 1',
+    value: 39,
+    max: 100,
+    display: '39',
+  });
+  assert.equal(res.breakdown[3].value, 0);
+  assert.equal(res.breakdown[4].value, 20);
+  assert.equal(
+    res.metadata.emojiGrid,
+    '🟥🟥⬜⬜⬜ 39\n🟥🟥🟥⬜⬜ 53\n⬜⬜⬜⬜⬜ 4\n⬜⬜⬜⬜⬜ 0\n🟥⬜⬜⬜⬜ 20'
+  );
+
+  // Double-pasted block deduplication
+  const doublePaste = `${singleShare}\n${singleShare}`;
+  const deduped = magnitudleParser.parse(doublePaste);
+  assert.equal(deduped.puzzleId, '#99');
+  assert.equal(deduped.primaryValue, 116);
+  assert.equal(deduped.displayValue, '116/500');
+  assert.equal(deduped.breakdown.length, 5);
+  assert.equal(deduped.metadata.emojiGrid, res.metadata.emojiGrid);
+
+  const legacySynthetic = magnitudleParser.parse('Magnitudle #77\nScore: 950');
+  assert.equal(legacySynthetic.puzzleId, '#77');
+  assert.equal(legacySynthetic.primaryValue, 950);
+  assert.equal(legacySynthetic.displayValue, '950');
+});
+
+test('timeguessrParser: parses new trophy round format (1️⃣ 🏆4,706 · 📅 3y · 🌍 12226.3km) and preserves grid keycaps', () => {
+  const realTg = [
+    'TimeGuessr #1265 — 27,292/50,000',
+    '',
+    '1️⃣ 🏆4,706 · 📅 3y · 🌍 12226.3km',
+    '2️⃣ 🏆3,351 · 📅 21y · 🌍 1651.6km',
+    '3️⃣ 🏆4,448 · 📅 6y · 🌍 4135.0km',
+    '4️⃣ 🏆7,371 · 📅 7y · 🌍 574.7km',
+    '5️⃣ 🏆7,416 · 📅 12y · 🌍 8.3km',
+    '',
+    'https://timeguessr.com',
+  ].join('\n');
+
+  assert.equal(timeguessrParser.canParse(realTg), true);
+  const res = timeguessrParser.parse(realTg);
+  assert.equal(res.puzzleId, '#1265');
+  assert.equal(res.primaryValue, 27292);
+  assert.equal(res.displayValue, '27,292 / 50,000');
+  assert.equal(res.metadata.maxScore, 50000);
+  assert.deepEqual(
+    res.breakdown.map((b) => ({ label: b.label, value: b.value, max: b.max })),
+    [
+      { label: 'Round 1', value: 4706, max: 10000 },
+      { label: 'Round 2', value: 3351, max: 10000 },
+      { label: 'Round 3', value: 4448, max: 10000 },
+      { label: 'Round 4', value: 7371, max: 10000 },
+      { label: 'Round 5', value: 7416, max: 10000 },
+    ]
+  );
+  assert.equal(
+    res.metadata.emojiGrid,
+    [
+      '1️⃣ 🏆4,706 · 📅 3y · 🌍 12226.3km',
+      '2️⃣ 🏆3,351 · 📅 21y · 🌍 1651.6km',
+      '3️⃣ 🏆4,448 · 📅 6y · 🌍 4135.0km',
+      '4️⃣ 🏆7,371 · 📅 7y · 🌍 574.7km',
+      '5️⃣ 🏆7,416 · 📅 12y · 🌍 8.3km',
+    ].join('\n')
+  );
+});
+
+test('utils: extractPuzzleId supports No./Puzzle formats and extractEmojiGrid handles hybrid grids without matching prose', () => {
+  assert.equal(extractPuzzleId('Fermi · No. 113'), '#113');
+  assert.equal(extractPuzzleId('Daily Puzzle 42 - 800 pts'), '#42');
+  assert.equal(extractPuzzleId('Puzzle #99 > No. 12'), '#99');
+
+  const hybridMagnitudle = [
+    'Size It Up',
+    '#99',
+    'Score: 116/500',
+    '🟥🟥⬜⬜⬜ 39',
+    '🟥🟥🟥⬜⬜ 53',
+  ].join('\n');
+  assert.equal(extractEmojiGrid(hybridMagnitudle), '🟥🟥⬜⬜⬜ 39\n🟥🟥🟥⬜⬜ 53');
+
+  const hybridTg = [
+    'TimeGuessr #1265 — 27,292/50,000',
+    '1️⃣ 🏆4,706 · 📅 3y · 🌍 12226.3km',
+    '2️⃣ 🏆3,351 · 📅 21y · 🌍 1651.6km',
+  ].join('\n');
+  assert.equal(
+    extractEmojiGrid(hybridTg),
+    '1️⃣ 🏆4,706 · 📅 3y · 🌍 12226.3km\n2️⃣ 🏆3,351 · 📅 21y · 🌍 1651.6km'
+  );
+
+  // Prose lines must NEVER be captured as emoji grids
+  assert.equal(extractEmojiGrid('Top 41% today · 🔥 2-day streak'), '');
+  assert.equal(
+    extractEmojiGrid('🔥 ⭐ Top 41% today · 2-day streak\n🔥 ⭐ Top 50% today · 3-day streak'),
+    ''
+  );
+  assert.equal(extractEmojiGrid('I solved the daily #CluesBySam, Nov 16th 2026'), '');
+  assert.equal(extractEmojiGrid('TimeGuessr #1265 — 27,292/50,000'), '');
 });
