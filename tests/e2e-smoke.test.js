@@ -104,9 +104,11 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
     { path: '/js/app.js', type: /application\/javascript/i, needle: 'detectGameAndParse' },
     { path: '/js/charts.js', type: /application\/javascript/i, needle: 'renderTrendChart' },
     { path: '/shared/auth-crypto.js', type: /application\/javascript/i, needle: 'STARTER_GAMES' },
+    { path: '/shared/stats.js', type: /application\/javascript/i, needle: 'computeGameStats' },
     { path: '/shared/parsers/registry.js', type: /application\/javascript/i, needle: 'export function detectGameAndParse' },
     { path: '/shared/parsers/utils.js', type: /application\/javascript/i, needle: 'export function getLocalDateString' },
     { path: '/shared/parsers/generic.js', type: /application\/javascript/i, needle: 'GENERIC_PARSER' },
+    { path: '/shared/parsers/games/eraly.js', type: /application\/javascript/i, needle: 'eralyParser' },
     { path: '/shared/parsers/games/wordle.js', type: /application\/javascript/i, needle: 'wordleParser' },
   ];
 
@@ -161,6 +163,7 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
       'Magnitudle',
       'Plain',
       'TimeGuessr',
+      'Eraly',
     ],
   );
   assert.deepEqual(
@@ -175,12 +178,14 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
       'magnitudle',
       'plain',
       'timeguessr',
+      'eraly',
     ],
   );
-  assert.equal(boot1.json.dailyOverview.activeGamesCount, 9);
+  assert.equal(boot1.json.dailyOverview.activeGamesCount, 10);
   assert.equal(boot1.json.dailyOverview.playedTodayCount, 0);
   assert.equal(boot1.json.dailyOverview.routineStreak, 0);
   assert.equal(boot1.json.dailyOverview.fullSweepDays, 0);
+  assert.deepEqual(boot1.json.entries, []);
   for (const g of boot1.json.games) {
     assert.ok(boot1.json.cardSummaries[g.id], `Missing cardSummary for ${g.name}`);
     assert.equal(boot1.json.cardSummaries[g.id].recentSparkline.length, 14);
@@ -190,7 +195,7 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
 
   const bootLive = await app.fetchJson('/api/bootstrap?live=1&tz=America/New_York');
   assert.equal(bootLive.status, 200);
-  assert.equal(bootLive.json.games.length, 9);
+  assert.equal(bootLive.json.games.length, 10);
 
   const cluesGame = boot1.json.games.find((g) => g.name === 'Clues by Sam');
   const krillionGame = boot1.json.games.find((g) => g.name === 'Krillion');
@@ -201,6 +206,7 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
   const magnitudleGame = boot1.json.games.find((g) => g.name === 'Magnitudle');
   const plainGame = boot1.json.games.find((g) => g.name === 'Plain');
   const timeguessrGame = boot1.json.games.find((g) => g.name === 'TimeGuessr');
+  const eralyGame = boot1.json.games.find((g) => g.name === 'Eraly');
 
   // 3. Create Wordle game
   const createWordle = await app.fetchJson('/api/games', {
@@ -378,6 +384,13 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
       expectedDisplay: '43,850 / 50,000',
     },
     {
+      gameId: eralyGame.id,
+      playDate: '2026-11-15',
+      rawText: 'Eraly #32 · I travelled to 1842 AD\n▰▰▰▰▰▰▰▱▱▱ 515/700\n🟨🟦🟩🟧🟥🟨💤\nhttps://eraly.io',
+      expectedValue: 515,
+      expectedDisplay: '515/700',
+    },
+    {
       gameId: wordleGame.id,
       playDate: '2026-11-15',
       rawText: wordleShareText,
@@ -402,17 +415,25 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
 
   const boot2 = await app.fetchJson('/api/bootstrap?date=2026-11-15');
   assert.equal(boot2.status, 200);
-  assert.equal(boot2.json.entriesForDate.length, 10);
-  assert.equal(boot2.json.dailyOverview.activeGamesCount, 10);
-  assert.equal(boot2.json.dailyOverview.playedTodayCount, 10);
+  assert.equal(boot2.json.entriesForDate.length, 11);
+  assert.equal(boot2.json.entries.length, 15);
+  assert.equal(boot2.json.dailyOverview.activeGamesCount, 11);
+  assert.equal(boot2.json.dailyOverview.playedTodayCount, 11);
   assert.equal(boot2.json.dailyOverview.routineStreak, 2);
   assert.equal(boot2.json.dailyOverview.fullSweepDays, 1);
+
+  const eralyStats = await app.fetchJson(`/api/stats?gameId=${eralyGame.id}&date=2026-11-15`);
+  assert.equal(eralyStats.status, 200);
+  assert.equal(eralyStats.json.gameStats.kpis.personalBest.value, 515);
+  assert.equal(eralyStats.json.gameStats.kpis.personalBest.displayValue, '515/700');
+  assert.equal(eralyStats.json.gameStats.breakdownSummary.length, 7);
+  assert.ok(eralyStats.json.gameStats.entries[0].metadata.emojiGrid.includes('🟨🟦🟩🟧🟥🟨💤'));
 
   // 6. Verify GET /api/stats?gameId=... for lower_is_better, higher_is_better PBs, Plain, TimeGuessr & Clues difficulty filtering
   const cluesStats = await app.fetchJson(`/api/stats?gameId=${cluesGame.id}&date=2026-11-15`);
   assert.equal(cluesStats.status, 200);
   assert.equal(cluesStats.json.heatmap.length, 91);
-  assert.equal(cluesStats.json.leaderboard.length, 10);
+  assert.equal(cluesStats.json.leaderboard.length, 11);
   assert.equal(cluesStats.json.gameStats.kpis.totalPlayed, 2);
   assert.equal(cluesStats.json.gameStats.kpis.currentStreak, 2);
   assert.equal(cluesStats.json.gameStats.supportsDifficulty, true);
@@ -497,8 +518,8 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
   const exported = await app.fetchJson('/api/export');
   assert.equal(exported.status, 200);
   assert.equal(exported.json.version, 1);
-  assert.equal(exported.json.games.length, 10);
-  assert.equal(exported.json.entries.length, 14);
+  assert.equal(exported.json.games.length, 11);
+  assert.equal(exported.json.entries.length, 15);
 
   // Logout & verify cookie cleared, then log back in
   const logout = await app.fetchJson('/api/auth/logout', { method: 'POST' });
@@ -532,13 +553,13 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
   });
   assert.equal(imported.status, 200);
   assert.equal(imported.json.ok, true);
-  assert.equal(imported.json.gamesCount, 10);
-  assert.equal(imported.json.entriesCount, 14);
+  assert.equal(imported.json.gamesCount, 11);
+  assert.equal(imported.json.entriesCount, 15);
 
   const restoredBoot = await app2.fetchJson('/api/bootstrap?date=2026-11-15');
   assert.equal(restoredBoot.status, 200);
-  assert.equal(restoredBoot.json.games.length, 10);
-  assert.equal(restoredBoot.json.entriesForDate.length, 10);
+  assert.equal(restoredBoot.json.games.length, 11);
+  assert.equal(restoredBoot.json.entriesForDate.length, 11);
   assert.equal(restoredBoot.json.dailyOverview.fullSweepDays, 1);
 
   const restoredWordleStats = await app2.fetchJson(`/api/stats?gameId=${wordleGame.id}&date=2026-11-15`);

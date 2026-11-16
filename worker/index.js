@@ -323,11 +323,7 @@ async function handleApiRequest(request, env, url, pathname) {
       throw new ValidationError('Invalid date (expected YYYY-MM-DD)');
     }
 
-    const [games, allEntries, catalog] = await Promise.all([
-      db.listGames({ userId, includeArchived: true }),
-      db.listEntries({ userId }),
-      db.listCatalogGames({ userId }),
-    ]);
+    const { games, allEntries, catalog } = await db.getBootstrapDataset(userId);
 
     const cardSummaries = computeCardSummaries(games, allEntries, date, {
       live,
@@ -364,6 +360,7 @@ async function handleApiRequest(request, env, url, pathname) {
       date,
       user: session.user,
       games,
+      entries: allEntries,
       entriesForDate,
       cardSummaries,
       dailyOverview,
@@ -569,11 +566,7 @@ async function handleApiRequest(request, env, url, pathname) {
       days = daysParam === 'all' ? null : parseDaysParam(daysParam);
     }
 
-    const [users, allGames, allEntries] = await Promise.all([
-      db.listUsersPublic(),
-      db.listAllGamesForLeaderboard(),
-      db.listAllEntriesForLeaderboard(),
-    ]);
+    const { users, allGames, allEntries } = await db.getLeaderboardDataset();
 
     let gameSlug = gameSlugParam && gameSlugParam.trim() ? gameSlugParam.trim() : null;
     if (!gameSlug && gameIdParam !== null && gameIdParam !== '') {

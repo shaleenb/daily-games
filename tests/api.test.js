@@ -113,7 +113,7 @@ test('seeds 9 starter games per user on registration without creating anonymous 
       passwordSalt: saltHex,
     });
     const games1 = db1.listGames({ userId: user1.id });
-    assert.equal(games1.length, 9);
+    assert.equal(games1.length, 10);
     assert.deepEqual(
       games1.map((g) => g.slug),
       [
@@ -126,6 +126,7 @@ test('seeds 9 starter games per user on registration without creating anonymous 
         'magnitudle',
         'plain',
         'timeguessr',
+        'eraly',
       ],
     );
     assert.equal(games1[0].parserId, 'cluesbysam');
@@ -151,6 +152,9 @@ test('seeds 9 starter games per user on registration without creating anonymous 
     assert.equal(games1[8].parserId, 'timeguessr');
     assert.equal(games1[8].resolvedParser.id, 'timeguessr');
     assert.equal(games1[8].resetTimezone, 'UTC');
+    assert.equal(games1[9].slug, 'eraly');
+    assert.equal(games1[9].parserId, 'eraly');
+    assert.equal(games1[9].resolvedParser.id, 'eraly');
 
     const user2 = db1.registerUser({
       name: 'Bob',
@@ -159,7 +163,7 @@ test('seeds 9 starter games per user on registration without creating anonymous 
       passwordSalt: saltHex,
     });
     const games2 = db1.listGames({ userId: user2.id });
-    assert.equal(games2.length, 9);
+    assert.equal(games2.length, 10);
     assert.deepEqual(
       games2.map((g) => g.slug),
       [
@@ -172,6 +176,7 @@ test('seeds 9 starter games per user on registration without creating anonymous 
         'magnitudle',
         'plain',
         'timeguessr',
+        'eraly',
       ],
     );
 
@@ -179,8 +184,8 @@ test('seeds 9 starter games per user on registration without creating anonymous 
     db1.close();
 
     const db2 = createDatabase({ dbPath });
-    assert.equal(db2.listGames({ userId: user1.id }).length, 10);
-    assert.equal(db2.listGames({ userId: user2.id }).length, 9);
+    assert.equal(db2.listGames({ userId: user1.id }).length, 11);
+    assert.equal(db2.listGames({ userId: user2.id }).length, 10);
     db2.close();
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -249,7 +254,7 @@ test('non-destructively migrates legacy pre-auth DB, preserves entries, and clai
         authenticated: false,
         user: null,
         hasUsers: false,
-        unclaimed: { gamesCount: 9, entriesCount: 1 },
+        unclaimed: { gamesCount: 10, entriesCount: 1 },
       });
     } finally {
       await ctx.close();
@@ -258,7 +263,7 @@ test('non-destructively migrates legacy pre-auth DB, preserves entries, and clai
     const db = createDatabase({ dbPath });
     assert.deepEqual(db.getAuthBootstrapStatus(), {
       hasUsers: false,
-      unclaimedGamesCount: 9,
+      unclaimedGamesCount: 10,
       unclaimedEntriesCount: 1,
     });
 
@@ -270,12 +275,13 @@ test('non-destructively migrates legacy pre-auth DB, preserves entries, and clai
       passwordSalt: saltHex,
     });
     const firstGames = db.listGames({ userId: firstUser.id });
-    assert.equal(firstGames.length, 9);
+    assert.equal(firstGames.length, 10);
     assert.equal(firstGames.find((g) => g.slug === 'cluesbysam').resetTimezone, 'America/New_York');
     assert.equal(firstGames.find((g) => g.slug === 'cluesbysam').parserId, 'cluesbysam');
     assert.equal(firstGames.find((g) => g.slug === 'pricepoint').resetTimezone, 'America/Los_Angeles');
     assert.ok(firstGames.some((g) => g.slug === 'plain'));
     assert.ok(firstGames.some((g) => g.slug === 'timeguessr'));
+    assert.ok(firstGames.some((g) => g.slug === 'eraly'));
 
     const firstEntries = db.listEntries({ userId: firstUser.id });
     assert.equal(firstEntries.length, 1);
@@ -292,7 +298,7 @@ test('non-destructively migrates legacy pre-auth DB, preserves entries, and clai
       unclaimedGamesCount: 0,
       unclaimedEntriesCount: 0,
     });
-    assert.equal(db.listGames({ userId: secondUser.id }).length, 9);
+    assert.equal(db.listGames({ userId: secondUser.id }).length, 10);
     assert.equal(db.listEntries({ userId: secondUser.id }).length, 0);
     db.close();
   } finally {
@@ -480,8 +486,9 @@ test('auth lifecycle, CSRF Sec-Fetch-Site protection, cookie attributes, and str
   const bobBoot = await bob.request('/api/bootstrap?date=2026-11-15');
   assert.equal(bobBoot.status, 200);
   assert.equal(bobBoot.json.user.email, 'bob@example.com');
-  assert.equal(bobBoot.json.games.length, 9);
+  assert.equal(bobBoot.json.games.length, 10);
   assert.equal(bobBoot.json.entriesForDate.length, 0);
+  assert.deepEqual(bobBoot.json.entries, []);
 
   // Bob probing Alice's IDs must fail with 404
   assert.equal(
@@ -554,14 +561,16 @@ test('REST API bootstrap, games CRUD, URL normalization, reorder, and static sec
   assert.equal(boot.status, 200);
   assert.equal(boot.json.date, '2026-11-15');
   assert.equal(boot.json.user.email, 'alice@example.com');
-  assert.equal(boot.json.games.length, 9);
-  assert.equal(boot.json.dailyOverview.activeGamesCount, 9);
+  assert.equal(boot.json.games.length, 10);
+  assert.equal(boot.json.dailyOverview.activeGamesCount, 10);
   assert.equal(boot.json.dailyOverview.playedTodayCount, 0);
+  assert.ok(Array.isArray(boot.json.entries));
   assert.ok(Array.isArray(boot.json.parsers));
   assert.ok(boot.json.parsers.some((p) => p.id === 'generic'));
   assert.ok(boot.json.parsers.some((p) => p.id === 'cluesbysam'));
   assert.ok(boot.json.parsers.some((p) => p.id === 'plain'));
   assert.ok(boot.json.parsers.some((p) => p.id === 'timeguessr'));
+  assert.ok(boot.json.parsers.some((p) => p.id === 'eraly'));
   assert.ok(boot.json.parsers.some((p) => p.id === 'wordle'));
 
   const created1 = await ctx.request('/api/games', {
@@ -790,7 +799,7 @@ test('detect, entries upsert/edit/delete, reparse, and stats for higher_is_bette
   assert.equal(farflungSummary.personalBest.value, 910);
   assert.equal(farflungSummary.personalBest.playDate, '2026-11-13');
 
-  assert.equal(boot.json.dailyOverview.activeGamesCount, 10);
+  assert.equal(boot.json.dailyOverview.activeGamesCount, 11);
   assert.equal(boot.json.dailyOverview.playedTodayCount, 2);
   assert.equal(boot.json.dailyOverview.routineStreak, 5);
   assert.equal(boot.json.dailyOverview.playedTodayInStreak, true);
@@ -902,14 +911,14 @@ test('export and import (replace & merge modes) are user-scoped and preserve gam
   const exported = await alice.request('/api/export');
   assert.equal(exported.status, 200);
   assert.equal(exported.json.version, 1);
-  assert.equal(exported.json.games.length, 9);
+  assert.equal(exported.json.games.length, 10);
   assert.equal(exported.json.entries.length, 1);
 
   await alice.request('/api/games', {
     method: 'POST',
     body: { name: 'Temp Game', url: 'https://temp.example.com' },
   });
-  assert.equal((await alice.request('/api/games')).json.games.length, 10);
+  assert.equal((await alice.request('/api/games')).json.games.length, 11);
 
   const replaceRes = await alice.request('/api/import', {
     method: 'POST',
@@ -921,14 +930,14 @@ test('export and import (replace & merge modes) are user-scoped and preserve gam
   });
   assert.equal(replaceRes.status, 200);
   assert.equal(replaceRes.json.ok, true);
-  assert.equal(replaceRes.json.gamesCount, 9);
+  assert.equal(replaceRes.json.gamesCount, 10);
   assert.equal(replaceRes.json.entriesCount, 1);
 
   // Bob's data must remain completely untouched by Alice's replace import!
   assert.equal((await bob.request('/api/entries')).json.entries.length, 1);
 
   const gamesAfter = (await alice.request('/api/games')).json.games;
-  assert.equal(gamesAfter.length, 9);
+  assert.equal(gamesAfter.length, 10);
 
   const statsAfter = await alice.request(`/api/stats?gameId=${perceptle.id}&date=2026-11-15`);
   assert.equal(statsAfter.json.gameStats.breakdownSummary.length, 2);
@@ -954,7 +963,7 @@ test('export and import (replace & merge modes) are user-scoped and preserve gam
   });
   assert.equal(mergeRes.status, 200);
   const gamesAfterMerge = (await alice.request('/api/games')).json.games;
-  assert.equal(gamesAfterMerge.length, 10);
+  assert.equal(gamesAfterMerge.length, 11);
   const importedWordle = gamesAfterMerge.find((g) => g.slug === 'wordle');
   assert.equal(importedWordle.resetTimezone, 'local');
   assert.equal(importedWordle.resetTime, '00:00');
@@ -1691,21 +1700,25 @@ test('Wave 2 migration: appends Plain & TimeGuessr onto existing 7-game shelves 
 
     const db1 = createDatabase({ dbPath });
     const games = db1.listGames({ userId: 1 });
-    assert.equal(games.length, 9);
+    assert.equal(games.length, 10);
     const cluesGame = games.find((g) => g.slug === 'cluesbysam');
     assert.equal(cluesGame.parserId, 'cluesbysam');
     assert.equal(cluesGame.resolvedParser.id, 'cluesbysam');
     const plainGame = games.find((g) => g.slug === 'plain');
     const tgGame = games.find((g) => g.slug === 'timeguessr');
+    const eralyGame = games.find((g) => g.slug === 'eraly');
     assert.ok(plainGame);
     assert.ok(tgGame);
+    assert.ok(eralyGame);
     assert.equal(plainGame.parserId, 'plain');
     assert.equal(tgGame.parserId, 'timeguessr');
+    assert.equal(eralyGame.parserId, 'eraly');
 
     const catRow = db1.sqlite.prepare("SELECT parser_id FROM game_catalog WHERE slug = 'cluesbysam'").get();
     assert.equal(catRow.parser_id, 'cluesbysam');
     assert.ok(db1.sqlite.prepare("SELECT 1 FROM game_catalog WHERE slug = 'plain'").get());
     assert.ok(db1.sqlite.prepare("SELECT 1 FROM game_catalog WHERE slug = 'timeguessr'").get());
+    assert.ok(db1.sqlite.prepare("SELECT 1 FROM game_catalog WHERE slug = 'eraly'").get());
 
     const autoBackfilled = db1.getEntryById(1, 1);
     assert.equal(autoBackfilled.difficulty, 'Hard');
@@ -1726,7 +1739,7 @@ test('Wave 2 migration: appends Plain & TimeGuessr onto existing 7-game shelves 
 
     const db2 = createDatabase({ dbPath });
     const gamesAfterDelete = db2.listGames({ userId: 1 });
-    assert.equal(gamesAfterDelete.length, 8);
+    assert.equal(gamesAfterDelete.length, 9);
     assert.equal(gamesAfterDelete.some((g) => g.slug === 'plain'), false);
     db2.close();
   } finally {
@@ -2687,6 +2700,225 @@ test('fermi_magnitudle_grids_backfill_v1 repairs Fermi 1.19 -> 1.30x, respects m
     assert.equal(tgRow.breakdown[0].value, 4706);
     assert.ok(tgRow.metadata.emojiGrid.includes('1️⃣ 🏆4,706'));
     db.close();
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('GET /api/bootstrap returns entries parity and GET /api/leaderboard returns gameBoardsBySlug parity (including cluesbysam.byDifficulty)', async (t) => {
+  const ctx = await startTestApp();
+  t.after(() => ctx.close());
+
+  const alice = createClient(ctx.baseUrl);
+  const bob = createClient(ctx.baseUrl);
+  await registerUser(alice, { name: 'Alice', email: 'alice-gb@example.com', password: 'password123' });
+  await registerUser(bob, { name: 'Bob', email: 'bob-gb@example.com', password: 'password123' });
+
+  const aliceGames = (await alice.request('/api/games')).json.games;
+  const bobGames = (await bob.request('/api/games')).json.games;
+  const aClues = aliceGames.find((g) => g.slug === 'cluesbysam');
+  const aFermi = aliceGames.find((g) => g.slug === 'fermi');
+  const bClues = bobGames.find((g) => g.slug === 'cluesbysam');
+  const bFermi = bobGames.find((g) => g.slug === 'fermi');
+
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aClues.id,
+      playDate: '2026-11-15',
+      rawText: 'I solved Clues by Sam (Easy) in 01:20',
+    },
+  });
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aClues.id,
+      playDate: '2026-11-16',
+      rawText: 'I solved Clues by Sam (Hard) in 02:30',
+    },
+  });
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aFermi.id,
+      playDate: '2026-11-16',
+      rawText: 'Fermi · No. 113\n01 ↑ 1.28×\n─────────\n1.30× score',
+    },
+  });
+
+  await bob.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: bClues.id,
+      playDate: '2026-11-15',
+      rawText: 'I solved Clues by Sam (Easy) in 00:55',
+    },
+  });
+  await bob.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: bClues.id,
+      playDate: '2026-11-16',
+      rawText: 'I solved Clues by Sam (Hard) in 03:00',
+    },
+  });
+  await bob.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: bFermi.id,
+      playDate: '2026-11-16',
+      rawText: 'Fermi · No. 113\n01 ↑ 2.10×\n─────────\n2.10× score',
+    },
+  });
+
+  const [bootRes, entriesRes] = await Promise.all([
+    alice.request('/api/bootstrap?date=2026-11-16'),
+    alice.request('/api/entries'),
+  ]);
+  assert.equal(bootRes.status, 200);
+  assert.equal(entriesRes.status, 200);
+  assert.deepEqual(bootRes.json.entries, entriesRes.json.entries);
+  assert.equal(bootRes.json.entries.length, 3);
+
+  const lbRes = await alice.request('/api/leaderboard?date=2026-11-16&days=30');
+  assert.equal(lbRes.status, 200);
+  assert.ok(lbRes.json.gameBoardsBySlug);
+
+  // Every catalog game must have a matching gameBoardsBySlug entry
+  for (const cg of lbRes.json.catalogGames) {
+    assert.ok(lbRes.json.gameBoardsBySlug[cg.slug], `Missing gameBoardsBySlug for ${cg.slug}`);
+    const individual = await alice.request(
+      `/api/leaderboard?date=2026-11-16&days=30&gameSlug=${encodeURIComponent(cg.slug)}`,
+    );
+    assert.deepEqual(
+      {
+        game: lbRes.json.gameBoardsBySlug[cg.slug].game,
+        standings: lbRes.json.gameBoardsBySlug[cg.slug].standings,
+      },
+      individual.json.gameBoard,
+    );
+  }
+
+  // Clues by Sam must include byDifficulty matching individual ?difficulty=... requests 1:1
+  const cluesBundle = lbRes.json.gameBoardsBySlug.cluesbysam;
+  assert.ok(cluesBundle.byDifficulty);
+  for (const diff of ['Easy', 'Medium', 'Tricky', 'Hard', 'Brutal']) {
+    assert.ok(cluesBundle.byDifficulty[diff], `Missing byDifficulty.${diff}`);
+    const individualDiff = await alice.request(
+      `/api/leaderboard?date=2026-11-16&days=30&gameSlug=cluesbysam&difficulty=${diff}`,
+    );
+    assert.deepEqual(cluesBundle.byDifficulty[diff], individualDiff.json.gameBoard);
+  }
+});
+
+test('eraly_starter_v1 migration appends Eraly onto a 9-game legacy shelf without reviving deleted games', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-games-eraly-mig-'));
+  const dbPath = path.join(tmpDir, 'eraly-legacy.db');
+
+  try {
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+      INSERT INTO schema_migrations (id, applied_at) VALUES
+        ('wave2_starters_and_cluesbysam_v1', '2026-11-16T00:00:00Z'),
+        ('cluesbysam_difficulty_backfill_v1', '2026-11-16T00:00:00Z'),
+        ('perceptle_parser_and_backfill_v1', '2026-11-16T00:00:00Z'),
+        ('fermi_magnitudle_grids_backfill_v1', '2026-11-16T00:00:00Z');
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE games (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        url TEXT NOT NULL,
+        icon TEXT NOT NULL DEFAULT '🎮',
+        color TEXT NOT NULL DEFAULT '#6366f1',
+        category TEXT NOT NULL DEFAULT 'Daily',
+        metric_label TEXT NOT NULL DEFAULT 'Score',
+        metric_format TEXT NOT NULL DEFAULT 'number',
+        metric_direction TEXT NOT NULL DEFAULT 'higher_is_better',
+        parser_id TEXT NOT NULL DEFAULT 'auto',
+        reset_timezone TEXT NOT NULL DEFAULT 'local',
+        reset_time TEXT NOT NULL DEFAULT '00:00',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(user_id, slug)
+      );
+      CREATE TABLE entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        play_date TEXT NOT NULL,
+        raw_text TEXT NOT NULL DEFAULT '',
+        parser_id TEXT NOT NULL DEFAULT 'generic',
+        parser_version INTEGER NOT NULL DEFAULT 1,
+        completed INTEGER NOT NULL DEFAULT 1,
+        solved INTEGER,
+        primary_value REAL,
+        display_value TEXT,
+        puzzle_id TEXT,
+        breakdown_json TEXT NOT NULL DEFAULT '[]',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT NOT NULL DEFAULT '',
+        manual_override INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(game_id, play_date)
+      );
+      INSERT INTO users (id, email, display_name, password_hash, password_salt, created_at)
+      VALUES (1, 'eraly@example.com', 'Player', 'h', 's', '2026-11-01T00:00:00Z');
+      -- Simulate 9-game user who intentionally deleted TimeGuessr (8 rows before migration)
+      INSERT INTO games (id, user_id, name, slug, url, metric_label, metric_format, metric_direction, parser_id, sort_order, archived, created_at)
+      VALUES
+        (1, 1, 'Clues by Sam', 'cluesbysam', 'https://cluesbysam.com', 'Solve Time', 'duration_sec', 'lower_is_better', 'cluesbysam', 1, 0, '2026-11-01T00:00:00Z'),
+        (2, 1, 'Krillion', 'krillion', 'https://krillion.io', 'Score', 'number', 'higher_is_better', 'auto', 2, 0, '2026-11-01T00:00:00Z'),
+        (3, 1, 'Farflung', 'farflung', 'https://farflunggame.fun', 'Score', 'number', 'higher_is_better', 'auto', 3, 0, '2026-11-01T00:00:00Z'),
+        (4, 1, 'Perceptle', 'perceptle', 'https://perceptle.com', 'Score', 'number', 'higher_is_better', 'perceptle', 4, 0, '2026-11-01T00:00:00Z'),
+        (5, 1, 'PricePoint', 'pricepoint', 'https://pricepoint.gg', 'Score', 'number', 'higher_is_better', 'auto', 5, 0, '2026-11-01T00:00:00Z'),
+        (6, 1, 'Fermi', 'fermi', 'https://fermi.gg', 'Avg Multiplier', 'number', 'lower_is_better', 'fermi', 6, 0, '2026-11-01T00:00:00Z'),
+        (7, 1, 'Magnitudle', 'magnitudle', 'https://magnitudle.com', 'Score', 'number', 'higher_is_better', 'magnitudle', 7, 0, '2026-11-01T00:00:00Z'),
+        (8, 1, 'Plain', 'plain', 'https://playplain.app/', 'Altitude', 'number', 'higher_is_better', 'plain', 8, 0, '2026-11-01T00:00:00Z');
+    `);
+    legacy.close();
+
+    const db1 = createDatabase({ dbPath });
+    const games = db1.listGames({ userId: 1 });
+    assert.equal(games.length, 9);
+    assert.equal(games.some((g) => g.slug === 'timeguessr'), false);
+    const eraly = games.find((g) => g.slug === 'eraly');
+    assert.ok(eraly);
+    assert.equal(eraly.parserId, 'eraly');
+    assert.equal(eraly.resolvedParser.id, 'eraly');
+    assert.equal(
+      db1.sqlite.prepare("SELECT parser_id FROM game_catalog WHERE slug = 'eraly'").get().parser_id,
+      'eraly',
+    );
+    assert.ok(
+      db1.sqlite.prepare("SELECT 1 FROM schema_migrations WHERE id = 'eraly_starter_v1'").get(),
+    );
+
+    // If user deletes Eraly, reopening must NOT revive it
+    db1.deleteGame(eraly.id, 1);
+    db1.close();
+
+    const db2 = createDatabase({ dbPath });
+    assert.equal(db2.listGames({ userId: 1 }).some((g) => g.slug === 'eraly'), false);
+    db2.close();
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

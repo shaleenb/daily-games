@@ -462,6 +462,7 @@ export function createApp({ dbPath = DEFAULT_DB_PATH } = {}) {
         date,
         user: session.user,
         games,
+        entries: allEntries,
         entriesForDate,
         cardSummaries,
         dailyOverview,

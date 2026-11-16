@@ -4,6 +4,7 @@ import {
   cluesBySamParser,
   normalizeDifficultyLabel,
 } from './games/cluesbysam.js';
+import { ERALY_BANDS, eralyParser } from './games/eraly.js';
 import { fermiParser } from './games/fermi.js';
 import { magnitudleParser } from './games/magnitudle.js';
 import { PERCEPTLE_ROUNDS, perceptleParser } from './games/perceptle.js';
@@ -28,6 +29,7 @@ import {
 
 export const PARSERS = [
   cluesBySamParser,
+  eralyParser,
   fermiParser,
   magnitudleParser,
   perceptleParser,
@@ -40,6 +42,7 @@ export {
   GENERIC_PARSER,
   CLUES_BY_SAM_DIFFICULTIES,
   normalizeDifficultyLabel,
+  ERALY_BANDS,
   PERCEPTLE_ROUNDS,
   COMMON_RESET_TIMEZONES,
   slugify,

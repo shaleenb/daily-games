@@ -411,6 +411,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
     'magnitudle',
     'plain',
     'timeguessr',
+    'eraly',
   ]);
   const BACKFILL_TIMEZONE_SLUGS = new Set(['cluesbysam', 'krillion', 'farflung', 'perceptle']);
 
@@ -1162,6 +1163,34 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       );
       backfillAllGameGridsAndFermi();
       markMigrationStmt.run(fermiMagnitudleMigrationId, now);
+    }
+
+    const eralyMigrationId = 'eraly_starter_v1';
+    if (!hasMigrationStmt.get(eralyMigrationId)) {
+      const eralyAppend = new Set(['eraly']);
+      const curUnclaimed = Number(
+        sqlite.prepare('SELECT COUNT(*) AS count FROM games WHERE user_id IS NULL').get().count,
+      );
+      if (curUnclaimed > 0) {
+        syncStarterGamesForUser(null, { appendSlugs: eralyAppend });
+      }
+      const existingUsersForEraly = sqlite.prepare('SELECT id FROM users ORDER BY id ASC').all();
+      const userGamesCountStmt = sqlite.prepare(
+        'SELECT COUNT(*) AS count FROM games WHERE user_id = ?',
+      );
+      for (const u of existingUsersForEraly) {
+        const uid = Number(u.id);
+        if (Number(userGamesCountStmt.get(uid).count) > 0) {
+          syncStarterGamesForUser(uid, { appendSlugs: eralyAppend });
+        }
+      }
+      sqlite.exec(
+        "UPDATE games SET parser_id = 'eraly' WHERE slug = 'eraly' AND parser_id = 'auto';",
+      );
+      sqlite.exec(
+        "UPDATE game_catalog SET parser_id = 'eraly' WHERE slug = 'eraly' AND parser_id = 'auto';",
+      );
+      markMigrationStmt.run(eralyMigrationId, now);
     }
   }
 

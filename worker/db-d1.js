@@ -163,9 +163,18 @@ const UPGRADE_PARSER_STARTER_SLUGS = new Set([
   'perceptle',
   'fermi',
   'magnitudle',
+  'eraly',
   'plain',
   'timeguessr',
 ]);
+const verifiedSchemaDbs = new WeakSet();
+const ALL_MIGRATION_IDS = [
+  'wave2_starters_and_cluesbysam_v1',
+  'cluesbysam_difficulty_backfill_v1',
+  'perceptle_parser_and_backfill_v1',
+  'fermi_magnitudle_grids_backfill_v1',
+  'eraly_starter_v1',
+];
 const BACKFILL_TIMEZONE_SLUGS = new Set(['cluesbysam', 'krillion', 'farflung', 'perceptle']);
 const GRID_METRIC_KEYS = [
   'seconds',
@@ -333,6 +342,11 @@ async function seedCatalogOnDb(db, now = new Date().toISOString()) {
   stmts.push(
     db.prepare(
       "UPDATE game_catalog SET parser_id = 'magnitudle' WHERE slug = 'magnitudle' AND parser_id = 'auto'",
+    ),
+  );
+  stmts.push(
+    db.prepare(
+      "UPDATE game_catalog SET parser_id = 'eraly' WHERE slug = 'eraly' AND parser_id = 'auto'",
     ),
   );
   stmts.push(
@@ -739,6 +753,15 @@ export async function ensureSchema(db) {
   if (!db) {
     throw new Error('D1 database binding (env.DB) is not configured');
   }
+  try {
+    const migRes = await db.prepare('SELECT id FROM schema_migrations').all();
+    const appliedSet = new Set((migRes?.results || []).map((r) => String(r.id)));
+    if (ALL_MIGRATION_IDS.every((id) => appliedSet.has(id))) {
+      return;
+    }
+  } catch {
+    // schema_migrations does not exist yet on fresh or unmigrated databases
+  }
   const existing = await db
     .prepare(
       "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'sessions', 'games', 'entries', 'game_catalog', 'schema_migrations')",
@@ -850,6 +873,76 @@ export async function ensureSchema(db) {
       .prepare('INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)')
       .bind(fermiMagnitudleMigrationId, now)
       .run();
+  }
+
+  const eralyMigrationId = 'eraly_starter_v1';
+  const eralyApplied = await db
+    .prepare('SELECT 1 AS applied FROM schema_migrations WHERE id = ?')
+    .bind(eralyMigrationId)
+    .first();
+  if (!eralyApplied) {
+    const eralyAppend = new Set(['eraly']);
+    const curUnclaimed = await db
+      .prepare('SELECT COUNT(*) AS count FROM games WHERE user_id IS NULL')
+      .first();
+    if (Number(curUnclaimed?.count || 0) > 0) {
+      await syncStarterGamesOnDb(db, null, { appendSlugs: eralyAppend });
+    }
+
+    const existingUsersForEraly = await db.prepare('SELECT id FROM users ORDER BY id ASC').all();
+    for (const u of existingUsersForEraly?.results || []) {
+      const uid = Number(u.id);
+      const hasGamesRow = await db
+        .prepare('SELECT COUNT(*) AS count FROM games WHERE user_id = ?')
+        .bind(uid)
+        .first();
+      if (Number(hasGamesRow?.count || 0) > 0) {
+        await syncStarterGamesOnDb(db, uid, { appendSlugs: eralyAppend });
+      }
+    }
+
+    const eralyStarter = STARTER_GAMES.find((g) => g.slug === 'eraly');
+    const stmts = [
+      db.prepare("UPDATE games SET parser_id = 'eraly' WHERE slug = 'eraly' AND parser_id = 'auto'"),
+      db.prepare(
+        "UPDATE game_catalog SET parser_id = 'eraly' WHERE slug = 'eraly' AND parser_id = 'auto'",
+      ),
+    ];
+    if (eralyStarter) {
+      stmts.push(
+        db
+          .prepare(`
+            INSERT OR IGNORE INTO game_catalog (
+              slug, name, url, icon, color, category,
+              metric_label, metric_format, metric_direction,
+              parser_id, reset_timezone, reset_time,
+              created_by_user_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+          `)
+          .bind(
+            eralyStarter.slug,
+            eralyStarter.name,
+            eralyStarter.url,
+            eralyStarter.icon,
+            eralyStarter.color,
+            eralyStarter.category,
+            eralyStarter.metricLabel,
+            eralyStarter.metricFormat,
+            eralyStarter.metricDirection,
+            eralyStarter.parserId,
+            eralyStarter.resetTimezone,
+            eralyStarter.resetTime,
+            now,
+            now,
+          ),
+      );
+    }
+    stmts.push(
+      db
+        .prepare('INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .bind(eralyMigrationId, now),
+    );
+    await db.batch(stmts);
   }
 }
 
@@ -1462,11 +1555,18 @@ export function createD1Database(d1) {
 
   let schemaPromise = null;
   async function ready() {
+    if (verifiedSchemaDbs.has(d1)) {
+      return;
+    }
     if (!schemaPromise) {
-      schemaPromise = ensureSchema(d1).catch((err) => {
-        schemaPromise = null;
-        throw err;
-      });
+      schemaPromise = ensureSchema(d1)
+        .then(() => {
+          verifiedSchemaDbs.add(d1);
+        })
+        .catch((err) => {
+          schemaPromise = null;
+          throw err;
+        });
     }
     return schemaPromise;
   }
@@ -1605,15 +1705,23 @@ export function createD1Database(d1) {
 
   async function getAuthBootstrapStatus() {
     await ready();
-    const [usersRow, gamesRow, entriesRow] = await Promise.all([
-      d1.prepare('SELECT COUNT(*) AS count FROM users').first(),
-      d1.prepare('SELECT COUNT(*) AS count FROM games WHERE user_id IS NULL').first(),
-      d1.prepare('SELECT COUNT(*) AS count FROM entries WHERE user_id IS NULL').first(),
+    const [usersRes, gamesRes, entriesRes] = await d1.batch([
+      d1.prepare('SELECT COUNT(*) AS count FROM users'),
+      d1.prepare('SELECT COUNT(*) AS count FROM games WHERE user_id IS NULL'),
+      d1.prepare('SELECT COUNT(*) AS count FROM entries WHERE user_id IS NULL'),
     ]);
     return {
-      hasUsers: Number(usersRow?.count || 0) > 0,
-      unclaimedGamesCount: Number(gamesRow?.count || 0),
-      unclaimedEntriesCount: Number(entriesRow?.count || 0),
+      hasUsers: Number(usersRes?.results?.[0]?.count || 0) > 0,
+      unclaimedGamesCount: Number(gamesRes?.results?.[0]?.count || 0),
+      unclaimedEntriesCount: Number(entriesRes?.results?.[0]?.count || 0),
+    };
+  }
+
+  function mapLeaderboardUserRow(r) {
+    return {
+      id: Number(r.id),
+      displayName: String(r.display_name),
+      createdAt: String(r.created_at),
     };
   }
 
@@ -1622,11 +1730,7 @@ export function createD1Database(d1) {
     const res = await d1
       .prepare('SELECT id, display_name, created_at FROM users ORDER BY id ASC')
       .all();
-    return (res?.results || []).map((r) => ({
-      id: Number(r.id),
-      displayName: String(r.display_name),
-      createdAt: String(r.created_at),
-    }));
+    return (res?.results || []).map(mapLeaderboardUserRow);
   }
 
   async function listAllGamesForLeaderboard() {
@@ -1643,6 +1747,20 @@ export function createD1Database(d1) {
       .prepare('SELECT * FROM entries WHERE user_id IS NOT NULL ORDER BY play_date ASC, id ASC')
       .all();
     return (res?.results || []).map(mapEntryRow);
+  }
+
+  async function getLeaderboardDataset() {
+    await ready();
+    const [usersRes, gamesRes, entriesRes] = await d1.batch([
+      d1.prepare('SELECT id, display_name, created_at FROM users ORDER BY id ASC'),
+      d1.prepare('SELECT * FROM games WHERE user_id IS NOT NULL ORDER BY sort_order ASC, id ASC'),
+      d1.prepare('SELECT * FROM entries WHERE user_id IS NOT NULL ORDER BY play_date ASC, id ASC'),
+    ]);
+    return {
+      users: (usersRes?.results || []).map(mapLeaderboardUserRow),
+      allGames: (gamesRes?.results || []).map(mapGameRow),
+      allEntries: (entriesRes?.results || []).map(mapEntryRow),
+    };
   }
 
   async function createSession({ id, userId, tokenHash, expiresAt }) {
@@ -2053,38 +2171,14 @@ export function createD1Database(d1) {
     return true;
   }
 
-  async function listCatalogGames({ userId } = {}) {
-    await ready();
-    const uid = parsePositiveInt(userId, 'userId');
-    const [catalogRes, countRes, viewerRes] = await Promise.all([
-      d1
-        .prepare(`
-          SELECT c.*, u.display_name AS created_by_name
-          FROM game_catalog c
-          LEFT JOIN users u ON u.id = c.created_by_user_id
-        `)
-        .all(),
-      d1
-        .prepare(`
-          SELECT slug, COUNT(DISTINCT user_id) AS player_count
-          FROM games
-          WHERE user_id IS NOT NULL AND archived = 0
-          GROUP BY slug
-        `)
-        .all(),
-      d1
-        .prepare('SELECT id, slug, archived, sort_order FROM games WHERE user_id = ?')
-        .bind(uid)
-        .all(),
-    ]);
-
+  function buildCatalogList(catalogRows, countRows, viewerGameRows) {
     const playerCounts = new Map();
-    for (const cr of countRes?.results || []) {
+    for (const cr of countRows) {
       playerCounts.set(String(cr.slug), Number(cr.player_count));
     }
 
     const viewerGames = new Map();
-    for (const vr of viewerRes?.results || []) {
+    for (const vr of viewerGameRows) {
       viewerGames.set(String(vr.slug), {
         id: Number(vr.id),
         archived: Boolean(vr.archived),
@@ -2092,7 +2186,7 @@ export function createD1Database(d1) {
       });
     }
 
-    const mapped = (catalogRes?.results || []).map((r) => {
+    const mapped = catalogRows.map((r) => {
       const slug = String(r.slug);
       const base = {
         slug,
@@ -2147,6 +2241,62 @@ export function createD1Database(d1) {
     });
 
     return mapped.map(({ _viewerSortOrder, ...item }) => item);
+  }
+
+  async function listCatalogGames({ userId } = {}) {
+    await ready();
+    const uid = parsePositiveInt(userId, 'userId');
+    const [catalogRes, countRes, viewerRes] = await d1.batch([
+      d1.prepare(`
+        SELECT c.*, u.display_name AS created_by_name
+        FROM game_catalog c
+        LEFT JOIN users u ON u.id = c.created_by_user_id
+      `),
+      d1.prepare(`
+        SELECT slug, COUNT(DISTINCT user_id) AS player_count
+        FROM games
+        WHERE user_id IS NOT NULL AND archived = 0
+        GROUP BY slug
+      `),
+      d1.prepare('SELECT id, slug, archived, sort_order FROM games WHERE user_id = ?').bind(uid),
+    ]);
+
+    return buildCatalogList(
+      catalogRes?.results || [],
+      countRes?.results || [],
+      viewerRes?.results || [],
+    );
+  }
+
+  async function getBootstrapDataset(userId) {
+    await ready();
+    const uid = parsePositiveInt(userId, 'userId');
+    const [gamesRes, entriesRes, catalogRes, countRes] = await d1.batch([
+      d1.prepare('SELECT * FROM games WHERE user_id = ? ORDER BY sort_order ASC, id ASC').bind(uid),
+      d1.prepare('SELECT * FROM entries WHERE user_id = ? ORDER BY play_date DESC, id DESC').bind(uid),
+      d1.prepare(`
+        SELECT c.*, u.display_name AS created_by_name
+        FROM game_catalog c
+        LEFT JOIN users u ON u.id = c.created_by_user_id
+      `),
+      d1.prepare(`
+        SELECT slug, COUNT(DISTINCT user_id) AS player_count
+        FROM games
+        WHERE user_id IS NOT NULL AND archived = 0
+        GROUP BY slug
+      `),
+    ]);
+
+    const gameRows = gamesRes?.results || [];
+    return {
+      games: gameRows.map(mapGameRow),
+      allEntries: (entriesRes?.results || []).map(mapEntryRow),
+      catalog: buildCatalogList(
+        catalogRes?.results || [],
+        countRes?.results || [],
+        gameRows,
+      ),
+    };
   }
 
   async function subscribeCatalogGame(rawSlug, userId) {
@@ -2309,13 +2459,34 @@ export function createD1Database(d1) {
       throw new ValidationError('Invalid entry payload');
     }
     const gameId = parsePositiveInt(input.gameId, 'gameId');
-    const game = await getGameById(gameId, uid);
-    if (!game) {
-      throw new NotFoundError('Game not found');
-    }
 
-    let playDate = input.playDate;
-    if (playDate === undefined || playDate === null || playDate === '') {
+    const hasExplicitPlayDate =
+      input.playDate !== undefined && input.playDate !== null && input.playDate !== '';
+    let game;
+    let playDate;
+    let existing;
+
+    if (hasExplicitPlayDate) {
+      if (!isValidYmd(input.playDate)) {
+        throw new ValidationError('Invalid playDate (expected YYYY-MM-DD)');
+      }
+      playDate = input.playDate;
+      const [gameRes, existingRes] = await d1.batch([
+        d1.prepare('SELECT * FROM games WHERE id = ? AND user_id = ?').bind(gameId, uid),
+        d1
+          .prepare('SELECT * FROM entries WHERE game_id = ? AND play_date = ? AND user_id = ?')
+          .bind(gameId, playDate, uid),
+      ]);
+      game = mapGameRow(gameRes?.results?.[0]);
+      if (!game) {
+        throw new NotFoundError('Game not found');
+      }
+      existing = mapEntryRow(existingRes?.results?.[0]);
+    } else {
+      game = await getGameById(gameId, uid);
+      if (!game) {
+        throw new NotFoundError('Game not found');
+      }
       const prelimParsed =
         typeof input.rawText === 'string' && input.rawText.trim()
           ? parseForGame(input.rawText, game)
@@ -2324,60 +2495,64 @@ export function createD1Database(d1) {
         prelimParsed?.puzzleDate && isValidYmd(prelimParsed.puzzleDate)
           ? prelimParsed.puzzleDate
           : getGamePuzzleStatus(game).activePuzzleDate;
-    }
-    if (!isValidYmd(playDate)) {
-      throw new ValidationError('Invalid playDate (expected YYYY-MM-DD)');
+      if (!isValidYmd(playDate)) {
+        throw new ValidationError('Invalid playDate (expected YYYY-MM-DD)');
+      }
+      existing = await getEntryByGameAndDate(game.id, playDate, uid);
     }
 
-    const existing = await getEntryByGameAndDate(game.id, playDate, uid);
     const resolved = resolveEntryValues(input, game, existing);
     const now = new Date().toISOString();
 
-    await d1
-      .prepare(`
-        INSERT INTO entries (
-          user_id, game_id, play_date, raw_text, parser_id, parser_version,
-          completed, solved, primary_value, display_value, puzzle_id,
-          breakdown_json, metadata_json, notes, manual_override,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(game_id, play_date) DO UPDATE SET
-          raw_text = excluded.raw_text,
-          parser_id = excluded.parser_id,
-          parser_version = excluded.parser_version,
-          completed = excluded.completed,
-          solved = excluded.solved,
-          primary_value = excluded.primary_value,
-          display_value = excluded.display_value,
-          puzzle_id = excluded.puzzle_id,
-          breakdown_json = excluded.breakdown_json,
-          metadata_json = excluded.metadata_json,
-          notes = excluded.notes,
-          manual_override = excluded.manual_override,
-          updated_at = excluded.updated_at
-      `)
-      .bind(
-        uid,
-        game.id,
-        playDate,
-        resolved.rawText,
-        resolved.parserId,
-        resolved.parserVersion,
-        sqlBool(resolved.completed),
-        sqlNullableBool(resolved.solved),
-        resolved.primaryValue,
-        resolved.displayValue,
-        resolved.puzzleId,
-        JSON.stringify(resolved.breakdown),
-        JSON.stringify(resolved.metadata),
-        resolved.notes,
-        sqlBool(resolved.manualOverride),
-        existing ? existing.createdAt : now,
-        now,
-      )
-      .run();
+    const [, savedRes] = await d1.batch([
+      d1
+        .prepare(`
+          INSERT INTO entries (
+            user_id, game_id, play_date, raw_text, parser_id, parser_version,
+            completed, solved, primary_value, display_value, puzzle_id,
+            breakdown_json, metadata_json, notes, manual_override,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(game_id, play_date) DO UPDATE SET
+            raw_text = excluded.raw_text,
+            parser_id = excluded.parser_id,
+            parser_version = excluded.parser_version,
+            completed = excluded.completed,
+            solved = excluded.solved,
+            primary_value = excluded.primary_value,
+            display_value = excluded.display_value,
+            puzzle_id = excluded.puzzle_id,
+            breakdown_json = excluded.breakdown_json,
+            metadata_json = excluded.metadata_json,
+            notes = excluded.notes,
+            manual_override = excluded.manual_override,
+            updated_at = excluded.updated_at
+        `)
+        .bind(
+          uid,
+          game.id,
+          playDate,
+          resolved.rawText,
+          resolved.parserId,
+          resolved.parserVersion,
+          sqlBool(resolved.completed),
+          sqlNullableBool(resolved.solved),
+          resolved.primaryValue,
+          resolved.displayValue,
+          resolved.puzzleId,
+          JSON.stringify(resolved.breakdown),
+          JSON.stringify(resolved.metadata),
+          resolved.notes,
+          sqlBool(resolved.manualOverride),
+          existing ? existing.createdAt : now,
+          now,
+        ),
+      d1
+        .prepare('SELECT * FROM entries WHERE game_id = ? AND play_date = ? AND user_id = ?')
+        .bind(game.id, playDate, uid),
+    ]);
 
-    return getEntryByGameAndDate(game.id, playDate, uid);
+    return mapEntryRow(savedRes?.results?.[0]);
   }
 
   async function updateEntry(id, input, userId) {
@@ -2849,6 +3024,8 @@ export function createD1Database(d1) {
     listUsersPublic,
     listAllGamesForLeaderboard,
     listAllEntriesForLeaderboard,
+    getLeaderboardDataset,
+    getBootstrapDataset,
     createSession,
     getSessionByTokenHash,
     deleteSessionByTokenHash,

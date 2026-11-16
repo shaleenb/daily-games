@@ -32,6 +32,7 @@ export function buildCfAssets() {
   const requiredFiles = [
     path.join(DIST_DIR, 'index.html'),
     path.join(DIST_SHARED_DIR, 'parsers', 'registry.js'),
+    path.join(DIST_SHARED_DIR, 'stats.js'),
     path.join(DIST_SHARED_DIR, 'auth-crypto.js'),
   ];
 

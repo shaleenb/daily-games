@@ -35,6 +35,7 @@ import {
   initThemeSystem,
   resolveActiveTheme,
 } from './themes.js';
+import { computeGameStats, computeHeatmap, computeLeaderboard } from '/shared/stats.js';
 
 const SCORING_PRESETS = {
   points: {
@@ -72,6 +73,7 @@ const state = {
   parsers: [],
   entriesForDate: [],
   allEntries: [],
+  entriesLoaded: false,
   cardSummaries: {},
   dailyOverview: {
     activeGamesCount: 0,
@@ -82,6 +84,8 @@ const state = {
   },
   statsResponse: null,
   leaderboardResponse: null,
+  leaderboardCache: new Map(),
+  leaderboardPrefetch: null,
   lbDate: getLocalDateString(),
   lbDays: 30,
   lbSelectedGameSlug: null,
@@ -111,6 +115,7 @@ const state = {
   isSavingEntry: false,
   isSavingGame: false,
   isRefreshingReset: false,
+  isBootstrapping: false,
   lastBootstrapDate: null,
   trackedResetEpochs: new Map(),
   resetTickerId: null,
@@ -737,15 +742,7 @@ function selectTheme(themeId) {
   }
 }
 
-async function refreshBootstrapAndEntries() {
-  state.todayStr = getLocalDateString();
-  const live = isLiveTodayMode();
-  const viewerTz = live ? getViewerTimeZone() : undefined;
-  const [bootstrap, entriesResp] = await Promise.all([
-    api.getBootstrap(state.selectedDate, live ? { live: true, tz: viewerTz } : {}),
-    api.getEntries({ limit: 800 }),
-  ]);
-
+function applyBootstrapPayload(bootstrap, entriesFallback = null) {
   if (bootstrap?.user) {
     state.user = bootstrap.user;
     if (els.userBadgeName) {
@@ -759,7 +756,13 @@ async function refreshBootstrapAndEntries() {
   state.entriesForDate = bootstrap?.entriesForDate || [];
   state.cardSummaries = bootstrap?.cardSummaries || {};
   state.dailyOverview = bootstrap?.dailyOverview || state.dailyOverview;
-  state.allEntries = Array.isArray(entriesResp) ? entriesResp : entriesResp?.entries || [];
+  if (Array.isArray(bootstrap?.entries)) {
+    state.allEntries = bootstrap.entries;
+    state.entriesLoaded = true;
+  } else if (Array.isArray(entriesFallback)) {
+    state.allEntries = entriesFallback;
+    state.entriesLoaded = true;
+  }
   state.lastBootstrapDate = state.selectedDate;
   snapshotResetEpochs();
   updateCatalogDiscoveryBadge();
@@ -768,6 +771,23 @@ async function refreshBootstrapAndEntries() {
   if (!state.selectedStatsGameId || !getGameById(state.selectedStatsGameId)) {
     state.selectedStatsGameId = activeGames[0]?.id || state.games[0]?.id || null;
   }
+}
+
+async function refreshBootstrapAndEntries() {
+  state.todayStr = getLocalDateString();
+  const live = isLiveTodayMode();
+  const viewerTz = live ? getViewerTimeZone() : undefined;
+  const bootstrap = await api.getBootstrap(
+    state.selectedDate,
+    live ? { live: true, tz: viewerTz } : {}
+  );
+  let entriesFallback = null;
+  if (!Array.isArray(bootstrap?.entries)) {
+    const entriesResp = await api.getEntries({ limit: 800 });
+    entriesFallback = Array.isArray(entriesResp) ? entriesResp : entriesResp?.entries || [];
+  }
+  applyBootstrapPayload(bootstrap, entriesFallback);
+  return bootstrap;
 }
 
 function getTodayEntryMap() {
@@ -1746,6 +1766,7 @@ async function saveParsedEntry(
 
     state.justStampedGameId = game.id;
     state.activeCaptureGameId = null;
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderTodayView();
     if (state.activeTab === 'stats') {
@@ -1824,6 +1845,7 @@ function showSavedEntryToast(game, saved, previous) {
       : async () => {
           try {
             await api.deleteEntry(saved.id);
+            invalidateLeaderboardCache();
             await refreshBootstrapAndEntries();
             renderTodayView();
             if (state.activeTab === 'stats') {
@@ -2414,6 +2436,7 @@ async function handleSubmitEntryModal(event) {
     state.justStampedGameId = game.id;
     state.activeCaptureGameId = null;
     closeModalDialog(els.entryDialog, 'saved');
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderTodayView();
     if (state.activeTab === 'stats') {
@@ -2444,6 +2467,7 @@ async function handleDeleteEntryFromModal() {
   try {
     await api.deleteEntry(entryId);
     closeModalDialog(els.entryDialog, 'deleted');
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderTodayView();
     if (state.activeTab === 'stats') {
@@ -2678,6 +2702,7 @@ async function handleSubscribeCatalogGame(
   try {
     const resp = await api.subscribeCatalogGame(slug);
     const gameName = resp?.game?.name || catalogItem?.name || slug;
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderTodayView();
     renderGamesAdminView();
@@ -2832,6 +2857,7 @@ async function handleSubmitGameModal(event) {
     }
 
     closeModalDialog(els.gameDialog, 'saved');
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderTodayView();
     if (state.activeTab === 'games') renderGamesAdminView();
@@ -3291,11 +3317,132 @@ function renderTodayMatrix(resp) {
     .join('');
 }
 
+const LEADERBOARD_CACHE_MAX = 12;
+
+function getLeaderboardCacheKey(
+  date = state.lbDate,
+  live = date === state.todayStr,
+  days = state.lbDays
+) {
+  return `${date}|${live ? 1 : 0}|${days}`;
+}
+
+function setLeaderboardCache(key, resp) {
+  if (!key || !resp) return;
+  if (state.leaderboardCache.has(key)) {
+    state.leaderboardCache.delete(key);
+  }
+  state.leaderboardCache.set(key, resp);
+  while (state.leaderboardCache.size > LEADERBOARD_CACHE_MAX) {
+    const oldestKey = state.leaderboardCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    state.leaderboardCache.delete(oldestKey);
+  }
+}
+
+function invalidateLeaderboardCache() {
+  state.leaderboardCache.clear();
+  state.leaderboardPrefetch = null;
+  if (state.activeTab !== 'leaderboard') {
+    state.leaderboardResponse = null;
+  }
+}
+
+function resolveGameBoardFromResponse(resp, slug, difficulty = 'all') {
+  if (!resp) return null;
+  const targetSlug = slug || resp.selectedGameSlug || resp.gameBoard?.game?.slug;
+  const entry = targetSlug ? resp?.gameBoardsBySlug?.[targetSlug] : null;
+  if (!entry) return null;
+  if (!difficulty || difficulty === 'all') {
+    return { game: entry.game, standings: entry.standings };
+  }
+  if (entry.byDifficulty?.[difficulty]) {
+    return entry.byDifficulty[difficulty];
+  }
+  if (
+    targetSlug === resp?.selectedGameSlug &&
+    resp?.gameBoard?.game?.filters?.difficulty === difficulty
+  ) {
+    return resp.gameBoard;
+  }
+  return null;
+}
+
+function setLeaderboardAriaBusy(busy) {
+  for (const el of [els.overallStandingsCard, els.todayMatrixCard, els.gamewiseLeaderboardCard]) {
+    if (!el) continue;
+    if (busy) {
+      el.setAttribute('aria-busy', 'true');
+    } else {
+      el.removeAttribute('aria-busy');
+    }
+  }
+}
+
+function scheduleLeaderboardPrefetch() {
+  if (!state.user) return;
+  const runPrefetch = () => {
+    if (!state.user) return;
+    const live = state.lbDate === state.todayStr;
+    const cacheKey = getLeaderboardCacheKey(state.lbDate, live, state.lbDays);
+    if (
+      state.leaderboardCache.has(cacheKey) ||
+      state.leaderboardPrefetch?.key === cacheKey ||
+      state.isLoadingLeaderboard
+    ) {
+      return;
+    }
+    const viewerTz = live ? getViewerTimeZone() : undefined;
+    const promise = api
+      .getLeaderboard({
+        date: state.lbDate,
+        live,
+        tz: viewerTz,
+        days: state.lbDays === 0 ? 'all' : state.lbDays,
+        gameSlug: state.lbSelectedGameSlug || undefined,
+      })
+      .then((resp) => {
+        if (state.user && resp) {
+          setLeaderboardCache(cacheKey, resp);
+        }
+        return resp;
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (state.leaderboardPrefetch?.key === cacheKey) {
+          state.leaderboardPrefetch = null;
+        }
+      });
+    state.leaderboardPrefetch = { key: cacheKey, promise };
+  };
+
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(runPrefetch, { timeout: 1500 });
+  } else {
+    setTimeout(runPrefetch, 200);
+  }
+}
+
 function renderGamewiseLeaderboard(resp) {
   const catalogGames = resp?.catalogGames || [];
-  const gameBoard = resp?.gameBoard || {};
-  const selectedGame = gameBoard.game || catalogGames[0] || null;
-  const selectedSlug = selectedGame?.slug || resp?.selectedGameSlug || state.lbSelectedGameSlug;
+  const requestedSlug =
+    state.lbSelectedGameSlug ||
+    resp?.selectedGameSlug ||
+    resp?.gameBoard?.game?.slug ||
+    catalogGames[0]?.slug ||
+    null;
+  const resolvedBoard = resolveGameBoardFromResponse(
+    resp,
+    requestedSlug,
+    state.leaderboardDifficulty
+  );
+  const gameBoard = resolvedBoard || resp?.gameBoard || {};
+  const selectedGame =
+    gameBoard.game ||
+    catalogGames.find((g) => g.slug === requestedSlug) ||
+    catalogGames[0] ||
+    null;
+  const selectedSlug = selectedGame?.slug || requestedSlug;
   const selectedCatalogItem = catalogGames.find((g) => g.slug === selectedSlug) || null;
 
   if (els.lbGamePills) {
@@ -3451,15 +3598,59 @@ function renderLeaderboardView() {
   renderGamewiseLeaderboard(resp);
 }
 
-async function loadAndRenderLeaderboardView() {
+async function loadAndRenderLeaderboardView({ forceRefresh = false } = {}) {
   if (!state.user) return;
   state.todayStr = getLocalDateString();
   const reqId = ++leaderboardRequestSeq;
   const live = state.lbDate === state.todayStr;
   const viewerTz = live ? getViewerTimeZone() : undefined;
+  const cacheKey = getLeaderboardCacheKey(state.lbDate, live, state.lbDays);
 
   renderLeaderboardControls();
+
+  if (forceRefresh) {
+    state.leaderboardCache.clear();
+  } else {
+    if (
+      state.leaderboardPrefetch?.key === cacheKey &&
+      !state.leaderboardCache.has(cacheKey) &&
+      state.leaderboardDifficulty === 'all'
+    ) {
+      try {
+        await state.leaderboardPrefetch.promise;
+      } catch {
+        // Fallback to direct request below
+      }
+      if (reqId !== leaderboardRequestSeq || !state.user) return;
+    }
+
+    const cached = state.leaderboardCache.get(cacheKey);
+    const hasRequestedGame =
+      !state.lbSelectedGameSlug ||
+      Boolean(cached?.gameBoardsBySlug?.[state.lbSelectedGameSlug]) ||
+      cached?.selectedGameSlug === state.lbSelectedGameSlug;
+    const hasRequestedDifficulty =
+      state.leaderboardDifficulty === 'all' ||
+      Boolean(
+        resolveGameBoardFromResponse(
+          cached,
+          state.lbSelectedGameSlug || cached?.selectedGameSlug,
+          state.leaderboardDifficulty
+        )
+      );
+
+    if (cached && hasRequestedGame && hasRequestedDifficulty) {
+      state.leaderboardResponse = cached;
+      if (!state.lbSelectedGameSlug && cached?.selectedGameSlug) {
+        state.lbSelectedGameSlug = cached.selectedGameSlug;
+      }
+      renderLeaderboardView();
+      return;
+    }
+  }
+
   state.isLoadingLeaderboard = true;
+  setLeaderboardAriaBusy(true);
   if (els.btnLbRefresh) {
     els.btnLbRefresh.disabled = true;
   }
@@ -3478,10 +3669,13 @@ async function loadAndRenderLeaderboardView() {
     });
     if (reqId !== leaderboardRequestSeq || !state.user) return;
     state.leaderboardResponse = resp;
-    if (resp?.selectedGameSlug) {
-      if (state.lbSelectedGameSlug && state.lbSelectedGameSlug !== resp.selectedGameSlug) {
-        state.leaderboardDifficulty = 'all';
-      }
+    if (
+      resp &&
+      (!state.leaderboardDifficulty || state.leaderboardDifficulty === 'all' || resp.gameBoardsBySlug)
+    ) {
+      setLeaderboardCache(cacheKey, resp);
+    }
+    if (resp?.selectedGameSlug && !state.lbSelectedGameSlug) {
       state.lbSelectedGameSlug = resp.selectedGameSlug;
     }
     renderLeaderboardView();
@@ -3492,6 +3686,7 @@ async function loadAndRenderLeaderboardView() {
   } finally {
     if (reqId === leaderboardRequestSeq) {
       state.isLoadingLeaderboard = false;
+      setLeaderboardAriaBusy(false);
       if (els.btnLbRefresh) {
         els.btnLbRefresh.disabled = false;
       }
@@ -3520,6 +3715,18 @@ function selectLeaderboardGameSlug(slug) {
       state.lbGameSortDir = getDefaultGameSortDir(state.lbGameSortKey, nextGame.metricDirection);
     }
   }
+
+  const instantBoard = resolveGameBoardFromResponse(state.leaderboardResponse, slug, 'all');
+  if (instantBoard) {
+    els.playersMatrixThead
+      ?.querySelectorAll('.matrix-game-head-btn[data-slug]')
+      .forEach((btn) => {
+        btn.classList.toggle('is-selected', btn.dataset.slug === slug);
+      });
+    renderGamewiseLeaderboard(state.leaderboardResponse);
+    return;
+  }
+
   loadAndRenderLeaderboardView();
 }
 
@@ -3533,11 +3740,21 @@ function selectStatsGame(gameId, { reload = false } = {}) {
     state.statsDifficulty = 'all';
   }
   if (reload) {
-    loadAndRenderStatsView();
+    loadAndRenderStatsView({ includeGlobal: false });
   }
 }
 
-async function loadAndRenderStatsView() {
+function syncStatsLeaderboardSelection() {
+  if (!els.leaderboardTbody) return;
+  els.leaderboardTbody.querySelectorAll('tr[data-game-id]').forEach((tr) => {
+    tr.classList.toggle(
+      'is-selected',
+      Number(tr.dataset.gameId) === Number(state.selectedStatsGameId)
+    );
+  });
+}
+
+async function loadAndRenderStatsView({ includeGlobal = true } = {}) {
   const activeGames = getActiveGames();
   const prevId = state.selectedStatsGameId;
   const selected =
@@ -3554,25 +3771,67 @@ async function loadAndRenderStatsView() {
   renderStatsGamePills();
   renderStatsWindowButtons();
 
-  try {
-    state.statsResponse = await api.getStats({
-      gameId: selected?.id ?? undefined,
-      days: state.statsDays === 0 ? 'all' : state.statsDays,
-      difficulty:
-        state.statsDifficulty && state.statsDifficulty !== 'all'
-          ? state.statsDifficulty
-          : undefined,
-    });
-    renderStatsViewContent();
-  } catch (err) {
-    showToast(`Failed to load stats: ${err.message}`, { variant: 'error' });
+  if (state.games.length > 0 && !state.entriesLoaded) {
+    try {
+      state.statsResponse = await api.getStats({
+        gameId: selected?.id ?? undefined,
+        days: state.statsDays === 0 ? 'all' : state.statsDays,
+        difficulty:
+          state.statsDifficulty && state.statsDifficulty !== 'all'
+            ? state.statsDifficulty
+            : undefined,
+      });
+      renderStatsViewContent({ includeGlobal: true });
+    } catch (err) {
+      showToast(`Failed to load stats: ${err.message}`, { variant: 'error' });
+    }
+    return;
+  }
+
+  state.todayStr = getLocalDateString();
+  const referenceDate = state.todayStr;
+  const daysVal = state.statsDays === 0 ? null : state.statsDays;
+  const diffVal =
+    state.statsDifficulty && state.statsDifficulty !== 'all' ? state.statsDifficulty : null;
+  const gameEntries = selected
+    ? state.allEntries.filter((e) => e.gameId === selected.id)
+    : [];
+  const gameStats = selected
+    ? computeGameStats(selected, gameEntries, {
+        days: daysVal,
+        referenceDate,
+        difficulty: diffVal,
+      })
+    : null;
+
+  const needGlobal =
+    includeGlobal || !state.statsResponse?.heatmap || !state.statsResponse?.leaderboard;
+
+  if (needGlobal) {
+    state.statsResponse = {
+      heatmap: computeHeatmap(state.games, state.allEntries, referenceDate, 91),
+      leaderboard: computeLeaderboard(state.games, state.allEntries, referenceDate),
+      gameStats,
+    };
+    renderStatsViewContent({ includeGlobal: true });
+  } else {
+    state.statsResponse = {
+      ...state.statsResponse,
+      gameStats,
+    };
+    renderStatsViewContent({ includeGlobal: false });
   }
 }
 
-function renderStatsViewContent() {
-  renderHeatmapSection();
-  renderLeaderboard();
+function renderStatsViewContent({ includeGlobal = true } = {}) {
+  if (includeGlobal) {
+    renderHeatmapSection();
+    renderLeaderboard();
+  } else {
+    syncStatsLeaderboardSelection();
+  }
   renderStatsGamePills();
+  renderStatsWindowButtons();
   renderStatsGameDetail();
 }
 
@@ -3913,6 +4172,7 @@ async function handleReparseGame() {
 
   try {
     const result = await api.reparseGame(game.id, { force: true });
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     await loadAndRenderStatsView();
     const updatedCount = result?.updatedCount ?? result?.updated ?? 0;
@@ -4006,6 +4266,7 @@ async function handleReorderGame(gameId, delta) {
 
   try {
     await api.reorderGames(ids);
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderGamesAdminView();
     renderTodayView();
@@ -4019,6 +4280,7 @@ async function handleToggleArchiveGame(gameId) {
   if (!game) return;
   try {
     await api.updateGame(game.id, { archived: !game.archived });
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderGamesAdminView();
     renderTodayView();
@@ -4043,6 +4305,7 @@ async function handleDeleteGame(gameId) {
 
   try {
     await api.deleteGame(game.id);
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderGamesAdminView();
     renderTodayView();
@@ -4191,6 +4454,7 @@ async function handleImportJson() {
     setHidden(els.importFileSummary, true);
     if (els.btnImportJson) els.btnImportJson.disabled = true;
 
+    invalidateLeaderboardCache();
     await refreshBootstrapAndEntries();
     renderTodayView();
     renderGamesAdminView();
@@ -4276,6 +4540,7 @@ function enterUnauthenticatedState() {
   state.parsers = [];
   state.entriesForDate = [];
   state.allEntries = [];
+  state.entriesLoaded = false;
   state.cardSummaries = {};
   state.dailyOverview = {
     activeGamesCount: 0,
@@ -4286,6 +4551,8 @@ function enterUnauthenticatedState() {
   };
   state.statsResponse = null;
   state.leaderboardResponse = null;
+  state.leaderboardCache.clear();
+  state.leaderboardPrefetch = null;
   state.lbSelectedGameSlug = null;
   state.lbOverallSortKey = 'points';
   state.lbOverallSortDir = 'desc';
@@ -4391,7 +4658,7 @@ function applyAuthBootstrapHints(meResp = null) {
   }
 }
 
-async function enterAuthenticatedApp(user) {
+async function enterAuthenticatedApp(user, { prefetchedBootstrap = null } = {}) {
   state.user = user;
   if (els.userBadgeName) {
     els.userBadgeName.textContent = user?.displayName || user?.name || user?.email || 'Player';
@@ -4411,13 +4678,25 @@ async function enterAuthenticatedApp(user) {
   state.selectedDate = state.todayStr;
   state.lbDate = state.todayStr;
   state.leaderboardResponse = null;
+  state.leaderboardCache.clear();
+  state.leaderboardPrefetch = null;
   state.lbSelectedGameSlug = null;
   setActiveTab('today', { skipLoad: true });
 
-  await refreshBootstrapAndEntries();
+  if (prefetchedBootstrap) {
+    let entriesFallback = null;
+    if (!Array.isArray(prefetchedBootstrap?.entries)) {
+      const entriesResp = await api.getEntries({ limit: 800 });
+      entriesFallback = Array.isArray(entriesResp) ? entriesResp : entriesResp?.entries || [];
+    }
+    applyBootstrapPayload(prefetchedBootstrap, entriesFallback);
+  } else {
+    await refreshBootstrapAndEntries();
+  }
   renderTodayView();
   renderGamesAdminView();
   startResetTicker();
+  scheduleLeaderboardPrefetch();
 }
 
 async function handleSignInSubmit(event) {
@@ -4540,6 +4819,7 @@ function bindEvents() {
   els.btnLogout?.addEventListener('click', handleLogout);
 
   window.addEventListener('dg:unauthorized', async () => {
+    if (state.isBootstrapping) return;
     const hadSession = Boolean(state.user);
     enterUnauthenticatedState();
     const me = await api.getMe().catch(() => null);
@@ -4773,7 +5053,7 @@ function bindEvents() {
   els.btnLbNextDay?.addEventListener('click', () => handleLeaderboardDateChange(addDays(state.lbDate, 1)));
   els.btnLbToday?.addEventListener('click', () => handleLeaderboardDateChange(getLocalDateString()));
   els.lbDateInput?.addEventListener('change', (e) => handleLeaderboardDateChange(e.target.value));
-  els.btnLbRefresh?.addEventListener('click', () => loadAndRenderLeaderboardView());
+  els.btnLbRefresh?.addEventListener('click', () => loadAndRenderLeaderboardView({ forceRefresh: true }));
 
   els.lbWindowGroup?.addEventListener('click', (event) => {
     const btn = event.target.closest('.seg-btn[data-days]');
@@ -4814,6 +5094,19 @@ function bindEvents() {
     const nextDiff = btn.dataset.difficulty || 'all';
     if (state.leaderboardDifficulty === nextDiff) return;
     state.leaderboardDifficulty = nextDiff;
+    const targetSlug =
+      state.lbSelectedGameSlug ||
+      state.leaderboardResponse?.selectedGameSlug ||
+      state.leaderboardResponse?.gameBoard?.game?.slug;
+    const instantBoard = resolveGameBoardFromResponse(
+      state.leaderboardResponse,
+      targetSlug,
+      nextDiff
+    );
+    if (instantBoard) {
+      renderGamewiseLeaderboard(state.leaderboardResponse);
+      return;
+    }
     loadAndRenderLeaderboardView();
   });
 
@@ -4892,7 +5185,7 @@ function bindEvents() {
     const nextDiff = btn.dataset.difficulty || 'all';
     if (state.statsDifficulty === nextDiff) return;
     state.statsDifficulty = nextDiff;
-    loadAndRenderStatsView();
+    loadAndRenderStatsView({ includeGlobal: false });
   });
 
   els.statsWindowGroup?.addEventListener('click', (event) => {
@@ -4901,7 +5194,7 @@ function bindEvents() {
     const raw = btn.dataset.days;
     state.statsDays = raw === 'all' ? 0 : Number(raw || 30);
     renderStatsWindowButtons();
-    loadAndRenderStatsView();
+    loadAndRenderStatsView({ includeGlobal: false });
   });
 
   els.btnReparseGame?.addEventListener('click', handleReparseGame);
@@ -4920,6 +5213,7 @@ function bindEvents() {
       if (!ok) return;
       try {
         await api.deleteEntry(btn.dataset.entryId);
+        invalidateLeaderboardCache();
         await refreshBootstrapAndEntries();
         renderTodayView();
         await loadAndRenderStatsView();
@@ -5158,13 +5452,14 @@ async function handleResetTicker() {
     if (!state.isSavingEntry && !state.isSavingGame && !state.isRefreshingReset) {
       state.isRefreshingReset = true;
       try {
+        invalidateLeaderboardCache();
         await refreshBootstrapAndEntries();
         if (state.activeTab === 'today') {
           renderTodayView();
         } else if (state.activeTab === 'leaderboard') {
-          await loadAndRenderLeaderboardView();
+          await loadAndRenderLeaderboardView({ forceRefresh: true });
         } else if (state.activeTab === 'stats') {
-          await loadAndRenderStatsView();
+          await loadAndRenderStatsView({ includeGlobal: true });
         }
       } catch {
         // Silent retry on next 30s tick
@@ -5188,7 +5483,7 @@ async function init() {
   initThemeSystem(() => {
     renderThemeOptions();
     if (state.user && state.activeTab === 'stats' && state.statsResponse) {
-      renderStatsViewContent();
+      renderStatsViewContent({ includeGlobal: true });
     }
   });
   renderThemeOptions();
@@ -5197,18 +5492,38 @@ async function init() {
 
   bindEvents();
 
+  state.isBootstrapping = true;
+  state.todayStr = getLocalDateString();
+  state.selectedDate = state.todayStr;
+  state.lbDate = state.todayStr;
+
   try {
-    const me = await api.getMe();
-    if (me?.authenticated && me?.user) {
-      await enterAuthenticatedApp(me.user);
+    const bootstrap = await api.getBootstrap(state.selectedDate, {
+      live: true,
+      tz: getViewerTimeZone(),
+    });
+    if (bootstrap?.user) {
+      await enterAuthenticatedApp(bootstrap.user, { prefetchedBootstrap: bootstrap });
     } else {
       enterUnauthenticatedState();
+      const me = await api.getMe().catch(() => null);
       applyAuthBootstrapHints(me);
     }
   } catch (err) {
     enterUnauthenticatedState();
-    applyAuthBootstrapHints(null);
-    showToast(`Failed to connect to Daily Games server: ${err.message}`, { variant: 'error' });
+    if (err?.status === 401) {
+      try {
+        const me = await api.getMe();
+        applyAuthBootstrapHints(me);
+      } catch {
+        applyAuthBootstrapHints(null);
+      }
+    } else {
+      applyAuthBootstrapHints(null);
+      showToast(`Failed to connect to Daily Games server: ${err.message}`, { variant: 'error' });
+    }
+  } finally {
+    state.isBootstrapping = false;
   }
 }
 

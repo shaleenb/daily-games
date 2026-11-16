@@ -3278,6 +3278,37 @@
     gap: 0.3rem;
     flex-shrink: 0;
   }
+
+  /* Below-the-Fold Progressive Rendering & Loading States */
+  #today-matrix-card,
+  #gamewise-leaderboard-card,
+  #parser-lab-drawer,
+  .history-block {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 420px;
+    contain-intrinsic-size: auto none auto 420px;
+  }
+
+  @supports not (content-visibility: auto) {
+    #today-matrix-card,
+    #gamewise-leaderboard-card,
+    #parser-lab-drawer,
+    .history-block {
+      contain: layout style paint;
+    }
+  }
+
+  #overall-standings-card,
+  #today-matrix-card,
+  #gamewise-leaderboard-card {
+    transition: opacity var(--transition-fast);
+  }
+
+  #overall-standings-card[aria-busy="true"],
+  #today-matrix-card[aria-busy="true"],
+  #gamewise-leaderboard-card[aria-busy="true"] {
+    opacity: 0.68;
+  }
 }
 
 @layer utilities {

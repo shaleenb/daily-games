@@ -20,6 +20,7 @@ import {
   getGamePuzzleStatus,
   CLUES_BY_SAM_DIFFICULTIES,
   normalizeDifficultyLabel,
+  ERALY_BANDS,
   PERCEPTLE_ROUNDS,
   PARSERS,
   GENERIC_PARSER,
@@ -29,6 +30,7 @@ import {
   detectGameAndParse,
 } from '../shared/parsers/registry.js';
 import { cluesBySamParser } from '../shared/parsers/games/cluesbysam.js';
+import { eralyParser } from '../shared/parsers/games/eraly.js';
 import { fermiParser } from '../shared/parsers/games/fermi.js';
 import { magnitudleParser } from '../shared/parsers/games/magnitudle.js';
 import { perceptleParser } from '../shared/parsers/games/perceptle.js';
@@ -869,8 +871,8 @@ test('timeguessrParser: parses totals, /max denominators, emoji lines, and per-r
   assert.equal(keycapRounds.breakdown.length, 2);
 });
 
-test('STARTER_GAMES & detectGameAndParse: includes 9 starter games including Plain and TimeGuessr', () => {
-  assert.equal(STARTER_GAMES.length, 9);
+test('STARTER_GAMES & detectGameAndParse: includes 10 starter games including Eraly', () => {
+  assert.equal(STARTER_GAMES.length, 10);
   assert.deepEqual(
     STARTER_GAMES.map((g) => g.slug),
     [
@@ -883,6 +885,7 @@ test('STARTER_GAMES & detectGameAndParse: includes 9 starter games including Pla
       'magnitudle',
       'plain',
       'timeguessr',
+      'eraly',
     ]
   );
   const cluesStarter = STARTER_GAMES.find((g) => g.slug === 'cluesbysam');
@@ -910,6 +913,12 @@ test('STARTER_GAMES & detectGameAndParse: includes 9 starter games including Pla
   assert.equal(tgStarter.parserId, 'timeguessr');
   assert.equal(tgStarter.sortOrder, 9);
   assert.equal(tgStarter.resetTimezone, 'UTC');
+
+  const eralyStarter = STARTER_GAMES.find((g) => g.slug === 'eraly');
+  assert.equal(eralyStarter.parserId, 'eraly');
+  assert.equal(eralyStarter.sortOrder, 10);
+  assert.equal(eralyStarter.url, 'https://eraly.io');
+  assert.equal(eralyStarter.resetTimezone, 'local');
 
   for (const game of STARTER_GAMES) {
     assert.equal(isValidResetTimezone(game.resetTimezone), true);
@@ -966,6 +975,16 @@ test('STARTER_GAMES & detectGameAndParse: includes 9 starter games including Pla
   assert.equal(detectedMagnitudle.parserId, 'magnitudle');
   assert.equal(detectedMagnitudle.parsed.primaryValue, 116);
   assert.equal(detectedMagnitudle.parsed.displayValue, '116/500');
+
+  const detectedEraly = detectGameAndParse(
+    'Eraly #32 · I travelled to 1842 AD\n▰▰▰▰▰▰▰▱▱▱ 515/700\n🟨🟦🟩🟧🟥🟨💤\nhttps://eraly.io',
+    starterWithIds
+  );
+  assert.equal(detectedEraly.matchedGame?.slug, 'eraly');
+  assert.equal(detectedEraly.confidence, 'high');
+  assert.equal(detectedEraly.parserId, 'eraly');
+  assert.equal(detectedEraly.parsed.primaryValue, 515);
+  assert.equal(detectedEraly.parsed.displayValue, '515/700');
 });
 
 test('perceptleParser: PERCEPTLE_ROUNDS, share formats, variation selectors, fallbacks, and registry matching', () => {
@@ -1335,4 +1354,104 @@ test('utils: extractPuzzleId supports No./Puzzle formats and extractEmojiGrid ha
   );
   assert.equal(extractEmojiGrid('I solved the daily #CluesBySam, Nov 16th 2026'), '');
   assert.equal(extractEmojiGrid('TimeGuessr #1265 — 27,292/50,000'), '');
+});
+
+test('eralyParser: ERALY_BANDS, standard share 515/700, (Archive) 🎃, BC year, emoji-only sum fallback, and registry matching', () => {
+  assert.deepEqual(ERALY_BANDS, {
+    '🟨': { emoji: '🟨', pts: 100, label: 'Timekeeper' },
+    '🟦': { emoji: '🟦', pts: 85, label: 'Chronicler' },
+    '🟩': { emoji: '🟩', pts: 60, label: 'Historian' },
+    '🟧': { emoji: '🟧', pts: 30, label: 'Explorer' },
+    '🟥': { emoji: '🟥', pts: 10, label: 'Tourist' },
+    '💤': { emoji: '💤', pts: 0, label: 'Lost in time' },
+  });
+
+  assert.equal(getParserById('eraly'), eralyParser);
+  assert.equal(
+    getParserForGame({ name: 'Eraly', slug: 'eraly', url: 'https://eraly.io', parserId: 'auto' }),
+    eralyParser
+  );
+  assert.equal(
+    getParserForGame({ name: 'Eraly', slug: 'eraly', parserId: 'eraly' }),
+    eralyParser
+  );
+
+  // 1. Standard share 515/700 with 7 decoded rounds
+  const standardShare = [
+    'Eraly #32 · I travelled to 1842 AD',
+    '▰▰▰▰▰▰▰▱▱▱ 515/700',
+    '🟨🟦🟩🟧🟥🟨💤',
+    'https://eraly.io',
+  ].join('\n');
+
+  assert.equal(eralyParser.canParse(standardShare), true);
+  const res1 = eralyParser.parse(standardShare);
+  assert.equal(res1.parserId, 'eraly');
+  assert.equal(res1.parserVersion, 1);
+  assert.equal(res1.isCustomParser, true);
+  assert.equal(res1.completed, true);
+  assert.equal(res1.puzzleId, '#32');
+  assert.equal(res1.primaryValue, 515);
+  assert.equal(res1.displayValue, '515/700');
+  assert.equal(res1.metricLabel, 'Score');
+  assert.equal(res1.metricFormat, 'number');
+  assert.equal(res1.metricDirection, 'higher_is_better');
+  assert.equal(res1.metadata.maxScore, 700);
+  assert.equal(res1.metadata.yearReached, '1842 AD');
+  assert.equal('archive' in res1.metadata, false);
+  assert.equal(res1.breakdown.length, 7);
+  assert.deepEqual(res1.breakdown[0], {
+    key: 'q1',
+    icon: '🟨',
+    name: 'Q1',
+    label: 'Q1 🟨',
+    value: 100,
+    max: 100,
+    display: '100',
+  });
+  assert.deepEqual(
+    res1.breakdown.map((b) => b.value),
+    [100, 85, 60, 30, 10, 100, 0]
+  );
+  assert.equal(res1.metadata.emojiGrid, '▰▰▰▰▰▰▰▱▱▱ 515/700\n🟨🟦🟩🟧🟥🟨💤');
+
+  // 2. (Archive) 🎃 + BC year + explicit YYYY-MM-DD
+  const archiveBcShare = [
+    'Eraly #14 (Archive) 🎃 · I travelled to 44 BC (2026-11-16)',
+    '▰▰▰▰▰▰▱▱▱▱ 480/700',
+    '🟨🟦🟦🟩🟧🟩🟥',
+    'https://eraly.io',
+  ].join('\n');
+  assert.equal(eralyParser.canParse(archiveBcShare), true);
+  const res2 = eralyParser.parse(archiveBcShare);
+  assert.equal(res2.puzzleId, '#14');
+  assert.equal(res2.puzzleDate, '2026-11-16');
+  assert.equal(res2.primaryValue, 480);
+  assert.equal(res2.displayValue, '480/700');
+  assert.equal(res2.metadata.archive, true);
+  assert.equal(res2.metadata.yearReached, '44 BC');
+  assert.equal(res2.metadata.maxScore, 700);
+
+  // 3. canParse via "I travelled to ... BC/BCE" + progress bar without "Eraly" header/URL
+  const barOnly = [
+    'I travelled to 350 BCE',
+    '▰▰▰▰▰▱▱▱▱▱ 410/700',
+    '🟨🟩🟧🟥🟦🟩💤',
+  ].join('\n');
+  assert.equal(eralyParser.canParse(barOnly), true);
+  const res3 = eralyParser.parse(barOnly);
+  assert.equal(res3.primaryValue, 410);
+  assert.equal(res3.metadata.yearReached, '350 BCE');
+
+  // 4. Emoji-only sum fallback when overall score is omitted
+  const emojiOnly = 'Eraly #33\n🟨🟦🟩🟧🟥🟨💤';
+  const res4 = eralyParser.parse(emojiOnly);
+  assert.equal(res4.puzzleId, '#33');
+  assert.equal(res4.primaryValue, 385);
+  assert.equal(res4.metadata.maxScore, 700);
+  assert.equal(res4.displayValue, '385/700');
+  assert.equal(res4.breakdown.length, 7);
+  assert.equal(res4.metadata.emojiGrid, '🟨🟦🟩🟧🟥🟨💤');
+
+  assert.equal(eralyParser.canParse('Wordle 1,234 4/6'), false);
 });

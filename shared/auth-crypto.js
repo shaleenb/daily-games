@@ -139,6 +139,21 @@ export const STARTER_GAMES = [
     resetTime: '00:00',
     sortOrder: 9,
   },
+  {
+    name: 'Eraly',
+    slug: 'eraly',
+    url: 'https://eraly.io',
+    icon: '⏳',
+    color: '#14b8a6',
+    category: 'History',
+    metricLabel: 'Score',
+    metricFormat: 'number',
+    metricDirection: 'higher_is_better',
+    parserId: 'eraly',
+    resetTimezone: 'local',
+    resetTime: '00:00',
+    sortOrder: 10,
+  },
 ];
 
 export const SECURITY_HEADERS = {
