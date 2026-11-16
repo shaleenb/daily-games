@@ -1,0 +1,22 @@
+{
+  "name": "daily-games-hub",
+  "version": "1.0.0",
+  "description": "Daily Games Hub & Score Tracker",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node --no-warnings server/index.js",
+    "test": "node --no-warnings --test tests/*.test.js",
+    "build:cf": "node scripts/build-cf-assets.mjs",
+    "cf:build": "npm run build:cf && cf build",
+    "deploy": "npm run build:cf && cf deploy"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^2.0.0-beta.sha-ad79608dd",
+    "cf": "^1.0.0-beta.6",
+    "vite": "^7.0.6"
+  }
+}

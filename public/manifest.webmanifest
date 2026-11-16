@@ -1,0 +1,24 @@
+{
+  "name": "Daily Games Hub",
+  "short_name": "Daily Games",
+  "description": "Pocket Arcade daily puzzle launchpad, reset countdowns, and score tracker.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f0e2",
+  "theme_color": "#ff5a36",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%23ff5a36'/%3E%3Crect x='112' y='112' width='124' height='124' rx='32' fill='%23fffdf8'/%3E%3Crect x='276' y='112' width='124' height='124' rx='32' fill='%2312a861'/%3E%3Crect x='112' y='276' width='124' height='124' rx='32' fill='%23e59800'/%3E%3Crect x='276' y='276' width='124' height='124' rx='32' fill='%23fffdf8'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' fill='%23ff5a36'/%3E%3Crect x='112' y='112' width='124' height='124' rx='32' fill='%23fffdf8'/%3E%3Crect x='276' y='112' width='124' height='124' rx='32' fill='%2312a861'/%3E%3Crect x='112' y='276' width='124' height='124' rx='32' fill='%23e59800'/%3E%3Crect x='276' y='276' width='124' height='124' rx='32' fill='%23fffdf8'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

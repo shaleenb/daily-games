@@ -1,0 +1,1166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ff5a36">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Daily Games">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Daily Games Hub &amp; Score Tracker</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23ff5a36'/%3E%3Crect x='14' y='14' width='15' height='15' rx='4' fill='%23fffdf8'/%3E%3Crect x='35' y='14' width='15' height='15' rx='4' fill='%2312a861'/%3E%3Crect x='14' y='35' width='15' height='15' rx='4' fill='%23e59800'/%3E%3Crect x='35' y='35' width='15' height='15' rx='4' fill='%23fffdf8'/%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%23ff5a36'/%3E%3Crect x='39' y='39' width='44' height='44' rx='12' fill='%23fffdf8'/%3E%3Crect x='97' y='39' width='44' height='44' rx='12' fill='%2312a861'/%3E%3Crect x='39' y='97' width='44' height='44' rx='12' fill='%23e59800'/%3E%3Crect x='97' y='97' width='44' height='44' rx='12' fill='%23fffdf8'/%3E%3C/svg%3E">
+  <script>
+    (() => {
+      try {
+        const key = 'daily-games-theme';
+        const raw = localStorage.getItem(key);
+        const map = { light: 'arcade-day', dark: 'arcade-night' };
+        const valid = new Set(['auto', 'arcade-day', 'arcade-night', 'mint-cartridge']);
+        const pref = map[raw] || (valid.has(raw) ? raw : 'auto');
+        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const resolved = pref === 'auto' ? (prefersDark ? 'arcade-night' : 'arcade-day') : pref;
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.dataset.themePreference = pref;
+        const meta = document.querySelector('meta[name="color-scheme"]');
+        if (meta) {
+          meta.content = pref === 'auto' ? 'light dark' : (resolved === 'arcade-night' ? 'dark' : 'light');
+        }
+      } catch {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/css/themes.css">
+  <link rel="stylesheet" href="/css/app.css">
+  <link rel="stylesheet" href="/css/charts.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header & Navigation -->
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="brand-badge" aria-hidden="true">🕹️</span>
+          <div class="brand-text">
+            <h1 class="brand-title">Daily Games Hub</h1>
+            <p class="brand-subtitle">Pocket Arcade Launchpad</p>
+          </div>
+        </div>
+
+        <nav id="main-nav" class="main-nav hidden" role="tablist" aria-label="Main sections">
+          <button
+            type="button"
+            class="nav-tab is-active"
+            role="tab"
+            aria-selected="true"
+            aria-controls="view-today"
+            tabindex="0"
+            data-tab="today"
+            id="tab-btn-today"
+          >
+            <span class="nav-tab-icon" aria-hidden="true">🎯</span>
+            <span>Today</span>
+          </button>
+          <button
+            type="button"
+            class="nav-tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="view-leaderboard"
+            tabindex="-1"
+            data-tab="leaderboard"
+            id="tab-btn-leaderboard"
+          >
+            <span class="nav-tab-icon" aria-hidden="true">🏆</span>
+            <span>Leaderboard</span>
+          </button>
+          <button
+            type="button"
+            class="nav-tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="view-stats"
+            tabindex="-1"
+            data-tab="stats"
+            id="tab-btn-stats"
+          >
+            <span class="nav-tab-icon" aria-hidden="true">📊</span>
+            <span>Stats</span>
+          </button>
+          <button
+            type="button"
+            class="nav-tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="view-games"
+            tabindex="-1"
+            data-tab="games"
+            id="tab-btn-games"
+          >
+            <span class="nav-tab-icon" aria-hidden="true">🕹️</span>
+            <span>My Games</span>
+          </button>
+        </nav>
+
+        <div class="topbar-actions">
+          <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-open-add-game">
+            <span aria-hidden="true">＋</span>
+            <span>Add Game</span>
+            <span id="add-game-catalog-badge" class="nav-count-pill hidden" aria-hidden="true"></span>
+          </button>
+
+          <div id="user-player-bar" class="user-player-bar hidden">
+            <span class="user-chip" title="Signed-in player">
+              <span class="user-chip-icon" aria-hidden="true">👤</span>
+              <span id="user-badge-name" class="user-chip-name"></span>
+            </span>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-logout">Sign Out</button>
+          </div>
+
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm theme-trigger-btn"
+            id="btn-theme-menu"
+            popovertarget="theme-popover"
+            aria-label="Choose visual theme"
+          >
+            <span id="theme-trigger-icon" aria-hidden="true">☀️</span>
+            <span class="theme-trigger-label" id="theme-trigger-name">Theme</span>
+            <span aria-hidden="true">▾</span>
+          </button>
+
+          <div id="theme-popover" class="theme-popover" popover="auto" aria-label="Theme selector">
+            <div class="theme-popover-head">
+              <span class="theme-popover-title">Visual Theme</span>
+              <span class="theme-popover-hint">Pluggable skins</span>
+            </div>
+            <div id="theme-options-list" class="theme-options-list"></div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Global Status / Toast Banner Container -->
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- ==================== AUTHENTICATION SCREEN ==================== -->
+    <section id="auth-screen" class="auth-screen hidden" aria-label="Account sign in">
+      <div class="surface-card auth-card">
+        <div class="auth-card-head">
+          <span class="auth-badge" aria-hidden="true">🕹️</span>
+          <div>
+            <h2 class="section-title">Insert Coin to Play</h2>
+            <p class="section-subtitle">Keep your streaks synced across phone &amp; desktop, or invite friends to track their own puzzles.</p>
+          </div>
+        </div>
+
+        <p id="auth-claim-notice" class="auth-claim-banner hidden" role="status"></p>
+
+        <div class="segmented-group auth-mode-tabs" role="group" aria-label="Authentication mode">
+          <button type="button" class="seg-btn is-active" id="btn-auth-mode-signin" data-auth-mode="signin" aria-pressed="true">
+            Sign In
+          </button>
+          <button type="button" class="seg-btn" id="btn-auth-mode-signup" data-auth-mode="signup" aria-pressed="false">
+            Create Account
+          </button>
+        </div>
+
+        <form id="signin-form" class="stacked-form">
+          <p id="signin-error" class="auth-error-banner hidden" role="alert"></p>
+
+          <div class="field-group">
+            <label class="field-label" for="signin-email">Email</label>
+            <input
+              type="email"
+              id="signin-email"
+              name="email"
+              class="text-input"
+              autocomplete="username"
+              inputmode="email"
+              enterkeyhint="next"
+              placeholder="you@example.com"
+              required
+            >
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="current-password">Password</label>
+            <div class="password-input-row">
+              <input
+                type="password"
+                id="current-password"
+                name="password"
+                class="text-input"
+                autocomplete="current-password"
+                enterkeyhint="done"
+                placeholder="Enter your password"
+                required
+              >
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm password-toggle-btn"
+                data-toggle-password="current-password"
+                aria-pressed="false"
+                aria-label="Show password"
+              >Show</button>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary auth-submit-btn" id="btn-signin-submit">Sign In</button>
+        </form>
+
+        <form id="signup-form" class="stacked-form hidden">
+          <p id="signup-error" class="auth-error-banner hidden" role="alert"></p>
+
+          <div class="field-group">
+            <label class="field-label" for="signup-name">Your Name</label>
+            <input
+              type="text"
+              id="signup-name"
+              name="name"
+              class="text-input"
+              autocomplete="name"
+              enterkeyhint="next"
+              maxlength="80"
+              placeholder="e.g. Alex"
+              required
+            >
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="signup-email">Email</label>
+            <input
+              type="email"
+              id="signup-email"
+              name="email"
+              class="text-input"
+              autocomplete="username"
+              inputmode="email"
+              enterkeyhint="next"
+              placeholder="you@example.com"
+              required
+            >
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="new-password">Password (8+ characters)</label>
+            <div class="password-input-row">
+              <input
+                type="password"
+                id="new-password"
+                name="new-password"
+                class="text-input"
+                autocomplete="new-password"
+                minlength="8"
+                maxlength="128"
+                enterkeyhint="done"
+                placeholder="At least 8 characters"
+                required
+              >
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm password-toggle-btn"
+                data-toggle-password="new-password"
+                aria-pressed="false"
+                aria-label="Show password"
+              >Show</button>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary auth-submit-btn" id="btn-signup-submit">Create Account</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Main Views Container -->
+    <main id="main-content" class="main-content hidden">
+      <!-- ==================== VIEW 1: TODAY / LAUNCHPAD ==================== -->
+      <section id="view-today" class="view-panel is-active" role="tabpanel" aria-labelledby="tab-btn-today">
+        <!-- Compact Arcade HUD Bar -->
+        <div class="arcade-hud surface-card">
+          <div class="hud-date-group">
+            <button type="button" class="btn btn-secondary btn-sm btn-step" id="btn-prev-day" aria-label="Previous day">
+              ‹
+            </button>
+            <label class="hud-date-pill" aria-label="Selected play date">
+              <span class="hud-date-pretty" id="hud-date-pretty">Today</span>
+              <input type="date" id="today-date-input" class="hud-date-native">
+            </label>
+            <button type="button" class="btn btn-secondary btn-sm btn-step" id="btn-next-day" aria-label="Next day">
+              ›
+            </button>
+            <button type="button" class="btn btn-ghost btn-xs hidden" id="btn-today">
+              Today
+            </button>
+          </div>
+
+          <div class="hud-meter-group">
+            <div class="hud-meter-top">
+              <span class="hud-meter-label tabular-nums" id="kpi-played-today">0 / 0 Cleared</span>
+              <div class="hud-badges-inline">
+                <span class="pill pill-warning tabular-nums hidden" id="kpi-routine-streak">🔥 0d streak</span>
+                <span class="pill pill-success tabular-nums hidden" id="kpi-full-sweeps">✨ 0 sweeps</span>
+              </div>
+            </div>
+            <div class="hud-segments" id="hud-segments" aria-hidden="true"></div>
+          </div>
+
+          <div class="hud-launch-group">
+            <button type="button" class="btn btn-primary" id="btn-launch-next">
+              <span aria-hidden="true">▶</span>
+              <span>Play Next</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-open-all-unplayed">
+              <span>Open All</span>
+              <span aria-hidden="true">↗</span>
+            </button>
+            <button type="button" class="btn btn-accent-outline btn-sm" id="btn-paste-hud" aria-expanded="false" aria-controls="quick-paste-tray">
+              <span>📋 Paste</span>
+              <kbd class="kbd-hint" id="kbd-paste-hint">⌘V</kbd>
+            </button>
+          </div>
+        </div>
+
+        <!-- Popup-blocked / Manual Launch Fallback Notice -->
+        <div id="popup-notice" class="inline-notice hidden" role="status"></div>
+
+        <!-- Collapsible Quick-Paste Tray (Hidden by default; global ⌘V/Ctrl+V works anywhere!) -->
+        <section id="quick-paste-tray" class="surface-card quick-paste-card hidden" aria-labelledby="quick-paste-heading">
+          <div class="quick-paste-header">
+            <div>
+              <h2 id="quick-paste-heading" class="section-title-sm">Paste Share Result</h2>
+              <p class="section-subtitle">Tip: You can press <kbd>⌘V</kbd> / <kbd>Ctrl+V</kbd> anywhere on this screen without opening this box.</p>
+            </div>
+            <div class="quick-paste-header-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-clipboard-paste">
+                📋 Paste Clipboard
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm hidden" id="btn-quick-paste-clear">
+                Clear
+              </button>
+              <button type="button" class="btn-icon btn-icon-sm" id="btn-close-paste-tray" aria-label="Close paste tray">
+                ✕
+              </button>
+            </div>
+          </div>
+
+          <div class="quick-paste-grid">
+            <div class="quick-paste-input-col">
+              <textarea
+                id="quick-paste-textarea"
+                class="textarea-code"
+                rows="3"
+                placeholder="Paste your share result here (e.g. Wordle 1,234 4/6, Clues by Sam time, Krillion score...)"
+              ></textarea>
+            </div>
+
+            <div class="quick-paste-preview-col">
+              <div id="quick-paste-preview" class="paste-preview-box">
+                <p class="empty-hint">Waiting for pasted result text…</p>
+              </div>
+
+              <div class="quick-paste-controls">
+                <label class="field-inline">
+                  <span class="field-label-xs">Game</span>
+                  <select id="quick-paste-game-select" class="select-input"></select>
+                </label>
+                <label class="field-inline">
+                  <span class="field-label-xs">Date</span>
+                  <input type="date" id="quick-paste-date-input" class="input-date input-sm">
+                </label>
+                <button type="button" class="btn btn-primary" id="btn-quick-paste-save" disabled>
+                  Stamp Done ✓
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Up Next Shelf -->
+        <section class="cards-section" id="to-play-section" aria-labelledby="heading-to-play">
+          <div class="section-header-row">
+            <h2 id="heading-to-play" class="section-title">
+              <span>Up Next</span>
+              <span class="count-badge" id="count-to-play">0</span>
+            </h2>
+            <span class="shelf-tip">Press <kbd>⌘V</kbd> after finishing a game to auto-log</span>
+          </div>
+          <div id="to-play-grid" class="games-grid"></div>
+        </section>
+
+        <!-- Cleared Today Ticket Shelf (Auto-hidden when empty) -->
+        <section class="cards-section hidden" id="completed-section" aria-labelledby="heading-completed">
+          <div class="section-header-row">
+            <h2 id="heading-completed" class="section-title">
+              <span>Cleared Today</span>
+              <span class="count-badge count-badge-success" id="count-completed">0</span>
+            </h2>
+          </div>
+          <div id="completed-grid" class="tickets-grid"></div>
+        </section>
+      </section>
+
+      <!-- ==================== VIEW 2: PLAYERS LEADERBOARD ==================== -->
+      <section id="view-leaderboard" class="view-panel" role="tabpanel" aria-labelledby="tab-btn-leaderboard">
+        <div class="leaderboard-hud surface-card">
+          <div class="leaderboard-hud-title-block">
+            <h2 class="section-title">🏆 Players Leaderboard</h2>
+            <p id="leaderboard-players-subtitle" class="section-subtitle">Loading player standings…</p>
+          </div>
+
+          <div class="leaderboard-hud-controls">
+            <div class="hud-date-group">
+              <button type="button" class="btn btn-secondary btn-sm btn-step" id="btn-lb-prev-day" aria-label="Previous leaderboard day">
+                ‹
+              </button>
+              <label class="hud-date-pill" aria-label="Selected leaderboard date">
+                <span class="hud-date-pretty" id="lb-date-pretty">Today</span>
+                <input type="date" id="lb-date-input" class="hud-date-native">
+              </label>
+              <button type="button" class="btn btn-secondary btn-sm btn-step" id="btn-lb-next-day" aria-label="Next leaderboard day">
+                ›
+              </button>
+              <button type="button" class="btn btn-ghost btn-xs hidden" id="btn-lb-today">
+                Today
+              </button>
+            </div>
+
+            <div class="segmented-group" id="lb-window-group" role="group" aria-label="Leaderboard time window">
+              <button type="button" class="seg-btn" data-days="1" id="btn-lb-days-1" aria-pressed="false">Today</button>
+              <button type="button" class="seg-btn" data-days="7" aria-pressed="false">7d</button>
+              <button type="button" class="seg-btn is-active" data-days="30" aria-pressed="true">30d</button>
+              <button type="button" class="seg-btn" data-days="90" aria-pressed="false">90d</button>
+              <button type="button" class="seg-btn" data-days="all" aria-pressed="false">All</button>
+            </div>
+
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-lb-refresh">
+              🔄 Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Card 1: Overall Players Standings -->
+        <section id="overall-standings-card" class="surface-card">
+          <div class="card-header-bar">
+            <div>
+              <h3 class="section-title" id="overall-standings-title">Overall Standings</h3>
+              <p class="section-subtitle">Ranked across all signed-up players</p>
+            </div>
+            <details class="arcade-pts-explainer" id="arcade-pts-explainer">
+              <summary class="arcade-pts-summary">
+                <span class="pill pill-accent">🥇 3 · 🥈 2 · 🥉 1 · ✓ 1 pt</span>
+                <span class="arcade-pts-trigger-text">What are Arcade Pts?</span>
+                <span class="arcade-pts-chevron" aria-hidden="true">▾</span>
+              </summary>
+              <div class="arcade-pts-panel">
+                <p><strong>Daily per-game scoring:</strong> Each puzzle day ranks all players who logged that game:</p>
+                <ul class="arcade-pts-list">
+                  <li><strong>🥇 1st place:</strong> 3 pts · <strong>🥈 2nd place:</strong> 2 pts · <strong>🥉 3rd place:</strong> 1 pt</li>
+                  <li><strong>✓ Played / DNF:</strong> 1 pt for logging any completed attempt</li>
+                  <li><strong>Ties:</strong> Equal scores share the same medal &amp; points using Olympic 1-2-2-4 ranking</li>
+                  <li><strong>Best-score direction:</strong> Lowest time, guesses, or multiplier wins on speed/guess games; highest score wins on points games</li>
+                </ul>
+                <p class="muted-text">Overall Arcade Pts sum your daily points across all games in the active window (Today, 7d, 30d, 90d, or All).</p>
+              </div>
+            </details>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="players-overall-table">
+              <caption class="visually-hidden">Overall multi-player arcade standings</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Rank</th>
+                  <th scope="col" class="sortable-th" data-sort-col="player" aria-sort="none">
+                    <button type="button" class="th-sort-btn" data-sort-table="overall" data-sort-key="player">
+                      <span>Player</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th is-sorted" data-sort-col="points" aria-sort="descending">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="overall" data-sort-key="points">
+                      <span>Arcade Pts</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↓</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="sortable-th" data-sort-col="medals" aria-sort="none">
+                    <button type="button" class="th-sort-btn" data-sort-table="overall" data-sort-key="medals">
+                      <span>Medals</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th" data-sort-col="today" aria-sort="none">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="overall" data-sort-key="today">
+                      <span>Today</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th" data-sort-col="streak" aria-sort="none">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="overall" data-sort-key="streak">
+                      <span>Streak</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th" data-sort-col="played" aria-sort="none">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="overall" data-sort-key="played">
+                      <span>Played</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="players-overall-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Card 2: Today's Player × Game Matrix -->
+        <section id="today-matrix-card" class="surface-card">
+          <div class="card-header-bar">
+            <div>
+              <h3 class="section-title">Today's Head-to-Head</h3>
+              <p id="players-matrix-subtitle" class="section-subtitle">Active puzzle matrix · 🔒 spoilers hidden until you play</p>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table matrix-table" id="players-matrix-table">
+              <caption class="visually-hidden">Player by game daily score matrix</caption>
+              <thead id="players-matrix-thead"></thead>
+              <tbody id="players-matrix-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Card 3: Gamewise Head-to-Head -->
+        <section id="gamewise-leaderboard-card" class="surface-card deep-dive-section">
+          <div class="card-header-bar">
+            <div>
+              <h3 class="section-title">Gamewise Head-to-Head</h3>
+              <p class="section-subtitle">Compare averages, personal bests, streaks, and daily ranks per game</p>
+            </div>
+          </div>
+
+          <div class="deep-dive-toolbar">
+            <div class="game-pills-bar" id="lb-game-pills" role="group" aria-label="Select game for head-to-head"></div>
+          </div>
+
+          <div id="lb-difficulty-bar" class="difficulty-filter-bar hidden" role="group" aria-label="Filter head-to-head by difficulty"></div>
+
+          <div id="lb-game-header" class="stats-game-header"></div>
+
+          <div class="table-scroll">
+            <table class="data-table" id="players-game-table">
+              <caption class="visually-hidden">Gamewise player leaderboard</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Rank</th>
+                  <th scope="col" class="sortable-th" data-sort-col="player" aria-sort="none">
+                    <button type="button" class="th-sort-btn" data-sort-table="game" data-sort-key="player">
+                      <span>Player</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th is-sorted" data-sort-col="points" aria-sort="descending">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="game" data-sort-key="points">
+                      <span>Game Pts</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↓</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="sortable-th" data-sort-col="today" aria-sort="none">
+                    <button type="button" class="th-sort-btn" data-sort-table="game" data-sort-key="today">
+                      <span>Today</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th" data-sort-col="average" aria-sort="none">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="game" data-sort-key="average">
+                      <span>Average</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th" data-sort-col="best" aria-sort="none">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="game" data-sort-key="best">
+                      <span>Best</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th" data-sort-col="streak" aria-sort="none">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="game" data-sort-key="streak">
+                      <span>Streak</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="num-col sortable-th" data-sort-col="played" aria-sort="none">
+                    <button type="button" class="th-sort-btn th-sort-btn-num" data-sort-table="game" data-sort-key="played">
+                      <span>Played</span>
+                      <span class="th-sort-indicator" aria-hidden="true">↕</span>
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="players-game-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <!-- ==================== VIEW 3: CHARTS & STATS ==================== -->
+      <section id="view-stats" class="view-panel" role="tabpanel" aria-labelledby="tab-btn-stats">
+        <!-- Global Activity Heatmap & Leaderboard -->
+        <div class="stats-global-grid">
+          <section class="surface-card stats-heatmap-card">
+            <div class="card-header-bar">
+              <div>
+                <h2 class="section-title">91-Day Activity Heatmap</h2>
+                <p class="section-subtitle">Click any day to inspect played games and scores</p>
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm hidden" id="btn-clear-heatmap-day">
+                Clear selection
+              </button>
+            </div>
+            <div id="activity-heatmap-container" class="chart-host"></div>
+            <div id="heatmap-day-detail" class="heatmap-day-detail hidden"></div>
+          </section>
+
+          <section class="surface-card stats-leaderboard-card">
+            <div class="card-header-bar">
+              <div>
+                <h2 class="section-title">Your Game Streaks</h2>
+                <p class="section-subtitle">Click a game row to inspect its deep-dive charts</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table" id="leaderboard-table">
+                <caption class="visually-hidden">Your per-game streaks and personal bests</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Game</th>
+                    <th scope="col" class="num-col">Played</th>
+                    <th scope="col" class="num-col">Current</th>
+                    <th scope="col" class="num-col">Longest</th>
+                    <th scope="col" class="num-col">30d</th>
+                    <th scope="col" class="num-col">Best</th>
+                  </tr>
+                </thead>
+                <tbody id="leaderboard-tbody"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- Per-Game Deep Dive -->
+        <section class="surface-card deep-dive-section">
+          <div class="deep-dive-toolbar">
+            <div class="game-pills-bar" id="stats-game-pills" role="group" aria-label="Select game for stats"></div>
+
+            <div class="deep-dive-right-controls">
+              <div class="segmented-group" id="stats-window-group" role="group" aria-label="Time window">
+                <button type="button" class="seg-btn" data-days="7">7d</button>
+                <button type="button" class="seg-btn is-active" data-days="30">30d</button>
+                <button type="button" class="seg-btn" data-days="90">90d</button>
+                <button type="button" class="seg-btn" data-days="all">All</button>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-reparse-game">
+                🔄 Re-parse Saved Results
+              </button>
+            </div>
+          </div>
+
+          <div id="stats-difficulty-bar" class="difficulty-filter-bar hidden" role="group" aria-label="Filter stats by difficulty"></div>
+
+          <div id="stats-game-header" class="stats-game-header"></div>
+
+          <!-- Per-Game KPI Cards -->
+          <div class="stats-kpis-grid" id="stats-kpis-grid"></div>
+
+          <!-- Charts Grid -->
+          <div class="charts-grid">
+            <div class="chart-panel chart-panel-wide">
+              <div class="chart-panel-head">
+                <h3 class="chart-title">Score / Solve Trend</h3>
+                <span class="chart-caption" id="trend-chart-caption">Click any point to inspect or edit</span>
+              </div>
+              <div id="trend-chart-container" class="chart-host"></div>
+            </div>
+
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-title">Score Distribution</h3>
+              </div>
+              <div id="distribution-chart-container" class="chart-host"></div>
+            </div>
+
+            <div class="chart-panel">
+              <div id="breakdown-chart-container" class="chart-host"></div>
+            </div>
+          </div>
+
+          <!-- Play History Table -->
+          <div class="history-block">
+            <div class="card-header-bar">
+              <h3 class="section-title-sm">Play History</h3>
+              <span class="muted-text tabular-nums" id="history-count-label"></span>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table" id="history-table">
+                <caption class="visually-hidden">Selected game play history</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Date</th>
+                    <th scope="col">Puzzle</th>
+                    <th scope="col">Result</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Notes / Share</th>
+                    <th scope="col" class="actions-col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="history-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ==================== VIEW 3: MY GAMES & PARSER LAB ==================== -->
+      <section id="view-games" class="view-panel" role="tabpanel" aria-labelledby="tab-btn-games">
+        <div class="games-admin-grid">
+          <!-- Manage Games Roster -->
+          <section class="surface-card">
+            <div class="card-header-bar">
+              <div>
+                <h2 class="section-title">Your Game Roster</h2>
+                <p class="section-subtitle">Reorder your daily shelf, edit colors/scoring, or archive games</p>
+              </div>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-add-game-admin">
+                ＋ Add Game
+              </button>
+            </div>
+            <div id="manage-games-list" class="manage-games-list"></div>
+            <div id="friends-catalog-shelf" class="friends-catalog-shelf hidden"></div>
+          </section>
+
+          <!-- Backup & Restore -->
+          <section class="surface-card">
+            <div class="card-header-bar">
+              <div>
+                <h2 class="section-title">Backup &amp; Restore</h2>
+                <p class="section-subtitle">Export all games &amp; play history as JSON, or restore from a backup file</p>
+              </div>
+            </div>
+
+            <div class="backup-stack">
+              <div class="backup-box">
+                <h3 class="section-title-sm">Export Data</h3>
+                <p class="muted-text">Download a portable JSON snapshot of your games and score history.</p>
+                <button type="button" class="btn btn-primary" id="btn-export-json">
+                  ⬇️ Download JSON Export
+                </button>
+              </div>
+
+              <div class="backup-box">
+                <h3 class="section-title-sm">Import Data</h3>
+                <p class="muted-text">Restore from a previously exported Daily Games Hub JSON file.</p>
+                <div class="import-controls">
+                  <input type="file" id="import-file-input" accept=".json,application/json" class="file-input">
+                  <div class="import-mode-row">
+                    <label class="radio-pill">
+                      <input type="radio" name="import-mode" value="merge" checked>
+                      <span>Merge with existing</span>
+                    </label>
+                    <label class="radio-pill">
+                      <input type="radio" name="import-mode" value="replace">
+                      <span>Replace all data</span>
+                    </label>
+                  </div>
+                  <p id="import-file-summary" class="muted-text hidden"></p>
+                  <button type="button" class="btn btn-secondary" id="btn-import-json" disabled>
+                    ⬆️ Import JSON Backup
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Collapsible Custom Parser Lab -->
+        <details class="surface-card parser-lab-drawer" id="parser-lab-drawer">
+          <summary class="parser-lab-summary">
+            <div class="parser-lab-summary-text">
+              <span class="section-title">🧪 Custom Parser Lab</span>
+              <span class="section-subtitle">Inspect how pasted share results parse or generate a custom parser request for chat</span>
+            </div>
+            <span class="parser-lab-chevron" aria-hidden="true">▾</span>
+          </summary>
+
+          <div class="parser-lab-body">
+            <div class="card-header-bar">
+              <div class="workbench-meta-strip" id="workbench-meta-strip"></div>
+              <button type="button" class="btn btn-accent-outline btn-sm" id="btn-copy-parser-request">
+                📋 Copy Parser Request for Chat
+              </button>
+            </div>
+
+            <div class="games-admin-grid">
+              <div class="workbench-controls">
+                <label class="field-group">
+                  <span class="field-label">Target Game</span>
+                  <select id="workbench-game-select" class="select-input"></select>
+                </label>
+                <label class="field-group">
+                  <span class="field-label">Sample Share Text</span>
+                  <textarea
+                    id="workbench-sample-text"
+                    class="textarea-code"
+                    rows="5"
+                    placeholder="Paste an authentic share result from this game to inspect ParsedGameResult JSON..."
+                  ></textarea>
+                </label>
+              </div>
+
+              <div class="workbench-output-wrap">
+                <span class="field-label">Extracted Result Preview</span>
+                <pre id="workbench-json-output" class="code-preview" tabindex="0"><code></code></pre>
+              </div>
+            </div>
+          </div>
+        </details>
+      </section>
+    </main>
+  </div>
+
+  <!-- ==================== LOG / EDIT RESULT DIALOG ==================== -->
+  <dialog id="entry-dialog" class="arcade-dialog" closedby="any" aria-labelledby="entry-modal-title">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <span id="entry-modal-icon" class="modal-game-icon" aria-hidden="true">🎮</span>
+        <div>
+          <h2 id="entry-modal-title" class="modal-title">Log Result</h2>
+          <p id="entry-modal-subtitle" class="modal-subtitle"></p>
+        </div>
+      </div>
+      <button type="button" class="btn-icon modal-close" id="btn-close-entry-modal" aria-label="Close modal">✕</button>
+    </div>
+
+    <form id="entry-modal-form" class="modal-body stacked-form">
+      <input type="hidden" id="entry-modal-id" name="id">
+      <input type="hidden" id="entry-modal-game-id" name="gameId">
+
+      <div class="modal-quick-actions">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-modal-paste-clipboard">
+          📋 Paste Clipboard
+        </button>
+        <button type="button" class="btn btn-accent-outline btn-sm" id="btn-mark-played-noscore">
+          ✓ Just Mark Played
+        </button>
+      </div>
+
+      <label class="field-group">
+        <span class="field-label">Paste Share Result</span>
+        <textarea
+          id="entry-modal-raw-text"
+          name="rawText"
+          class="textarea-code"
+          rows="4"
+          placeholder="Paste the share text copied from the game..."
+        ></textarea>
+      </label>
+
+      <div id="entry-modal-parse-preview" class="paste-preview-box">
+        <p class="empty-hint">Paste result text above or enter values manually below.</p>
+      </div>
+
+      <div class="override-divider">
+        <span>Score &amp; Details</span>
+        <label class="checkbox-inline">
+          <input type="checkbox" id="entry-modal-manual-override" name="manualOverride">
+          <span>Manual score override</span>
+        </label>
+      </div>
+
+      <div class="form-row-2">
+        <label class="field-group">
+          <span class="field-label" id="entry-modal-value-label">Value</span>
+          <input type="text" id="entry-modal-value-input" name="primaryValue" class="text-input tabular-nums" placeholder="Auto from paste">
+        </label>
+        <label class="field-group">
+          <span class="field-label">Puzzle ID</span>
+          <input type="text" id="entry-modal-puzzle-id" name="puzzleId" class="text-input" placeholder="e.g. #142">
+        </label>
+      </div>
+
+      <div class="form-row-2">
+        <div class="field-group">
+          <span class="field-label">Outcome</span>
+          <div class="segmented-group" id="entry-modal-solved-group" role="group" aria-label="Outcome">
+            <button type="button" class="seg-btn is-active" data-solved="auto">Auto</button>
+            <button type="button" class="seg-btn" data-solved="true">Solved</button>
+            <button type="button" class="seg-btn" data-solved="false">DNF</button>
+            <button type="button" class="seg-btn" data-solved="null">Open</button>
+          </div>
+        </div>
+
+        <label class="field-group">
+          <span class="field-label">Play Date</span>
+          <input type="date" id="entry-modal-date" name="playDate" class="input-date">
+        </label>
+      </div>
+
+      <div id="entry-modal-difficulty-group" class="field-group hidden">
+        <span class="field-label">Difficulty</span>
+        <div id="entry-modal-difficulty-pills" class="difficulty-seg-group" role="group" aria-label="Puzzle difficulty">
+          <button type="button" class="difficulty-pill" data-difficulty="" aria-pressed="true"><span>None</span></button>
+          <button type="button" class="difficulty-pill" data-diff="Easy" data-difficulty="Easy" aria-pressed="false"><span class="difficulty-dot" aria-hidden="true"></span><span>Easy</span></button>
+          <button type="button" class="difficulty-pill" data-diff="Medium" data-difficulty="Medium" aria-pressed="false"><span class="difficulty-dot" aria-hidden="true"></span><span>Medium</span></button>
+          <button type="button" class="difficulty-pill" data-diff="Tricky" data-difficulty="Tricky" aria-pressed="false"><span class="difficulty-dot" aria-hidden="true"></span><span>Tricky</span></button>
+          <button type="button" class="difficulty-pill" data-diff="Hard" data-difficulty="Hard" aria-pressed="false"><span class="difficulty-dot" aria-hidden="true"></span><span>Hard</span></button>
+          <button type="button" class="difficulty-pill" data-diff="Brutal" data-difficulty="Brutal" aria-pressed="false"><span class="difficulty-dot" aria-hidden="true"></span><span>Brutal</span></button>
+        </div>
+      </div>
+
+      <div id="entry-modal-rounds-group" class="field-group hidden">
+        <div class="rounds-group-head">
+          <span class="field-label">Round Scores (0–100)</span>
+          <span class="muted-text">Auto-filled from paste or enter individually</span>
+        </div>
+        <div
+          id="entry-modal-rounds-inputs"
+          class="perceptle-rounds-grid"
+          role="group"
+          aria-label="Perceptle round scores"
+        ></div>
+      </div>
+
+      <label class="field-group">
+        <span class="field-label">Notes</span>
+        <input type="text" id="entry-modal-notes" name="notes" class="text-input" placeholder="Optional personal notes...">
+      </label>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-danger-ghost hidden" id="btn-entry-modal-delete">Delete Entry</button>
+        <div class="modal-footer-right">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-entry-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-save-entry-modal">Save Result</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================== ADD / EDIT GAME DIALOG ==================== -->
+  <dialog id="game-dialog" class="arcade-dialog" closedby="any" aria-labelledby="game-form-title">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <span id="game-dialog-preview-icon" class="modal-game-icon-tile" aria-hidden="true">🎮</span>
+        <div>
+          <h2 id="game-form-title" class="modal-title">Add New Game</h2>
+          <p class="modal-subtitle" id="game-dialog-subtitle">Customize your cartridge color, icon &amp; scoring style</p>
+        </div>
+      </div>
+      <button type="button" class="btn-icon modal-close" id="btn-close-game-dialog" aria-label="Close modal">✕</button>
+    </div>
+
+    <div class="modal-body game-dialog-body">
+      <section id="catalog-picker-section" class="catalog-picker-section hidden" aria-labelledby="catalog-picker-title">
+        <div class="catalog-picker-head">
+          <div>
+            <h3 id="catalog-picker-title" class="section-title-sm">🕹️ Hub Game Catalog</h3>
+            <p class="section-subtitle">One-click add games your friends already play</p>
+          </div>
+        </div>
+        <label for="catalog-search-input" class="visually-hidden">Filter hub game catalog</label>
+        <input
+          type="search"
+          id="catalog-search-input"
+          name="catalogSearch"
+          class="text-input input-sm"
+          placeholder="Filter games or URLs…"
+        >
+        <div id="catalog-available-list" class="catalog-list"></div>
+        <details id="catalog-owned-details" class="catalog-owned-details">
+          <summary id="catalog-owned-summary">Already on your shelf</summary>
+          <div id="catalog-owned-list" class="catalog-list"></div>
+        </details>
+      </section>
+
+      <form id="game-form" class="stacked-form">
+        <input type="hidden" id="game-form-id" name="id">
+
+        <div id="create-custom-divider" class="override-divider">
+          <span>Or Create a Brand-New Game</span>
+          <span>Shared to Hub Catalog</span>
+        </div>
+
+        <div class="form-row-2">
+          <label class="field-group">
+            <span class="field-label">Game Name *</span>
+            <input type="text" id="game-name" name="name" class="text-input" required placeholder="e.g. Wordle, Connections">
+          </label>
+          <label class="field-group">
+            <span class="field-label">Game URL *</span>
+            <input type="text" id="game-url" name="url" inputmode="url" class="text-input" required placeholder="https://...">
+          </label>
+        </div>
+
+        <div id="game-catalog-match-banner" class="catalog-match-banner hidden" role="status"></div>
+
+      <div class="form-row-3">
+        <label class="field-group">
+          <span class="field-label">Emoji Icon</span>
+          <input type="text" id="game-icon" name="icon" class="text-input" value="🎮" maxlength="8">
+        </label>
+        <label class="field-group">
+          <span class="field-label">Cartridge Color</span>
+          <div class="color-picker-wrap">
+            <input type="color" id="game-color" name="color" class="color-input" value="#ff5a36">
+            <span id="game-color-hex" class="color-hex tabular-nums">#ff5a36</span>
+          </div>
+        </label>
+        <label class="field-group">
+          <span class="field-label">Category</span>
+          <input type="text" id="game-category" name="category" class="text-input" value="Daily" placeholder="Logic, Word, Trivia...">
+        </label>
+      </div>
+
+      <div class="swatch-preset-row">
+        <div class="emoji-chips" aria-label="Quick icon presets">
+          <button type="button" class="emoji-chip" data-emoji="🕵️">🕵️</button>
+          <button type="button" class="emoji-chip" data-emoji="🦑">🦑</button>
+          <button type="button" class="emoji-chip" data-emoji="🌍">🌍</button>
+          <button type="button" class="emoji-chip" data-emoji="👁️">👁️</button>
+          <button type="button" class="emoji-chip" data-emoji="🟩">🟩</button>
+          <button type="button" class="emoji-chip" data-emoji="🧩">🧩</button>
+          <button type="button" class="emoji-chip" data-emoji="🎯">🎯</button>
+          <button type="button" class="emoji-chip" data-emoji="🧠">🧠</button>
+          <button type="button" class="emoji-chip" data-emoji="🔤">🔤</button>
+          <button type="button" class="emoji-chip" data-emoji="⏱️">⏱️</button>
+        </div>
+        <div class="color-swatches" aria-label="Quick color swatches">
+          <button type="button" class="color-swatch-btn" data-color="#ff5a36" style="background:#ff5a36" aria-label="Coral Red"></button>
+          <button type="button" class="color-swatch-btn" data-color="#f59e0b" style="background:#f59e0b" aria-label="Marigold"></button>
+          <button type="button" class="color-swatch-btn" data-color="#10b981" style="background:#10b981" aria-label="Arcade Green"></button>
+          <button type="button" class="color-swatch-btn" data-color="#06b6d4" style="background:#06b6d4" aria-label="Electric Cyan"></button>
+          <button type="button" class="color-swatch-btn" data-color="#8b5cf6" style="background:#8b5cf6" aria-label="Grape"></button>
+          <button type="button" class="color-swatch-btn" data-color="#ec4899" style="background:#ec4899" aria-label="Bubblegum"></button>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <span class="field-label">How Do You Win?</span>
+        <div class="scoring-mode-grid" id="scoring-mode-grid" role="group" aria-label="Scoring mode presets">
+          <button type="button" class="scoring-tile is-selected" data-preset="points">
+            <span class="scoring-tile-icon" aria-hidden="true">🏆</span>
+            <span class="scoring-tile-title">Higher Score</span>
+            <span class="scoring-tile-sub">Points, streaks</span>
+          </button>
+          <button type="button" class="scoring-tile" data-preset="time">
+            <span class="scoring-tile-icon" aria-hidden="true">⏱️</span>
+            <span class="scoring-tile-title">Faster Time</span>
+            <span class="scoring-tile-sub">Lower mm:ss wins</span>
+          </button>
+          <button type="button" class="scoring-tile" data-preset="guesses">
+            <span class="scoring-tile-icon" aria-hidden="true">🎯</span>
+            <span class="scoring-tile-title">Fewer Tries</span>
+            <span class="scoring-tile-sub">e.g. 4/6 guesses</span>
+          </button>
+          <button type="button" class="scoring-tile" data-preset="percent">
+            <span class="scoring-tile-icon" aria-hidden="true">💯</span>
+            <span class="scoring-tile-title">Accuracy %</span>
+            <span class="scoring-tile-sub">Higher % wins</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="field-group reset-schedule-block">
+        <span class="field-label">Daily Reset Schedule</span>
+        <div class="form-row-2">
+          <div class="field-group">
+            <label class="field-label-xs" for="game-reset-timezone">Reset Timezone</label>
+            <select
+              id="game-reset-timezone"
+              name="resetTimezone"
+              class="select-input"
+              aria-describedby="game-reset-preview"
+            >
+              <option value="local">Local midnight (Device time)</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label class="field-label-xs" for="game-reset-time">Reset Time</label>
+            <input
+              type="time"
+              id="game-reset-time"
+              name="resetTime"
+              class="text-input tabular-nums"
+              value="00:00"
+              aria-describedby="game-reset-preview"
+            >
+          </div>
+        </div>
+        <p id="game-reset-preview" class="reset-schedule-preview"></p>
+      </div>
+
+      <details class="advanced-game-details" id="advanced-game-details">
+        <summary>Advanced metric &amp; parser options</summary>
+        <div class="advanced-game-fields">
+          <div class="form-row-2">
+            <label class="field-group">
+              <span class="field-label">Metric Label</span>
+              <input type="text" id="game-metric-label" name="metricLabel" class="text-input" value="Score" placeholder="Score, Solve Time, Guesses">
+            </label>
+            <label class="field-group">
+              <span class="field-label">Metric Format</span>
+              <select id="game-metric-format" name="metricFormat" class="select-input">
+                <option value="number">Number (e.g. 840)</option>
+                <option value="duration_sec">Duration (mm:ss)</option>
+                <option value="percent">Percent (e.g. 92%)</option>
+                <option value="fraction">Fraction (e.g. 4/6)</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-row-2">
+            <label class="field-group">
+              <span class="field-label">Metric Direction</span>
+              <select id="game-metric-direction" name="metricDirection" class="select-input">
+                <option value="higher_is_better">Higher is Better</option>
+                <option value="lower_is_better">Lower is Better</option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span class="field-label">Result Parser</span>
+              <select id="game-parser-id" name="parserId" class="select-input">
+                <option value="auto">Auto-detect (Recommended)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </details>
+
+      <div class="modal-footer">
+        <div class="modal-footer-right">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-game-dialog">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-save-game">Add Game</button>
+        </div>
+      </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- ==================== CONFIRMATION DIALOG ==================== -->
+  <dialog id="confirm-dialog" class="arcade-dialog arcade-dialog-sm" closedby="any" aria-labelledby="confirm-modal-title">
+    <div class="modal-header">
+      <h2 id="confirm-modal-title" class="modal-title">Confirm Action</h2>
+      <button type="button" class="btn-icon modal-close" id="btn-close-confirm-modal" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="confirm-modal-message" class="confirm-message"></p>
+    </div>
+    <div class="modal-footer modal-footer-pad">
+      <div class="modal-footer-right">
+        <button type="button" class="btn btn-secondary" id="btn-confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-danger" id="btn-confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
