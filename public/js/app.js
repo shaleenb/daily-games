@@ -90,7 +90,8 @@ const state = {
   dialogCatalogTag: 'All',
   friendsCatalogTag: 'All',
   friendsCatalogSearch: '',
-  openCatalogCollections: new Set(['community', 'magnitudle']),
+  openCatalogCollections: {},
+  openArchivedRoster: false,
   parsers: [],
   entriesForDate: [],
   allEntries: [],
@@ -2755,7 +2756,7 @@ function getUrlMatchKey(raw) {
 
 const CATALOG_COLLECTION_GROUPS = [
   { key: 'community', title: "✨ Friends' Picks & Community Games", defaultOpen: true },
-  { key: 'magnitudle', title: '📏 Magnitudle Collection', defaultOpen: true },
+  { key: 'magnitudle', title: '📏 Magnitudle Collection', defaultOpen: false },
   { key: 'flightq', title: '✈️ FlightQ Daily Collection', defaultOpen: false },
 ];
 
@@ -2832,7 +2833,10 @@ function renderCatalogCollectionsHtml(items, { contextKey, forceOpen = false } =
       <details class="catalog-collection-group" data-collection-context="${escapeHtml(contextKey)}" data-collection-key="${escapeHtml(group.key)}" ${isOpen ? 'open' : ''}>
         <summary class="catalog-collection-summary">
           <span>${escapeHtml(group.title)}</span>
-          <span class="pill pill-neutral catalog-collection-count tabular-nums">${escapeHtml(String(groupItems.length))}</span>
+          <span class="catalog-collection-right">
+            <span class="pill pill-neutral catalog-collection-count tabular-nums">${escapeHtml(String(groupItems.length))}</span>
+            <span class="catalog-collection-chevron" aria-hidden="true">▾</span>
+          </span>
         </summary>
         <div class="catalog-collection-items catalog-list">
           ${groupItems.map((item) => renderCatalogItemHtml(item)).join('')}
@@ -2892,25 +2896,26 @@ function renderCatalogItemHtml(item) {
   const domain = getGameDomainLabel(item.url) || item.url;
   const playerCount = Number(item.playerCount || 0);
   const isBusy = state.subscribingSlugs.has(item.slug);
+  const titleAttr = `${item.name}${domain ? ` (${domain})` : ''}`;
 
   let actionHtml = '<span class="pill pill-success">On Shelf ✓</span>';
   if (item.viewerStatus === 'not_added') {
-    actionHtml = `<button type="button" class="btn btn-primary btn-xs" data-action="subscribe-catalog-game" data-slug="${escapeHtml(item.slug)}" ${isBusy ? 'disabled' : ''}>${isBusy ? 'Adding…' : '＋ Add to Shelf'}</button>`;
+    actionHtml = `<button type="button" class="btn btn-primary btn-xs btn-compact-act" data-action="subscribe-catalog-game" data-slug="${escapeHtml(item.slug)}" aria-label="Add ${escapeHtml(item.name)} to shelf" ${isBusy ? 'disabled' : ''}>${isBusy ? 'Adding…' : '＋ Add'}</button>`;
   } else if (item.viewerStatus === 'archived') {
-    actionHtml = `<button type="button" class="btn btn-secondary btn-xs" data-action="subscribe-catalog-game" data-slug="${escapeHtml(item.slug)}" ${isBusy ? 'disabled' : ''}>${isBusy ? 'Restoring…' : '↺ Restore'}</button>`;
+    actionHtml = `<button type="button" class="btn btn-secondary btn-xs btn-compact-act" data-action="subscribe-catalog-game" data-slug="${escapeHtml(item.slug)}" aria-label="Restore ${escapeHtml(item.name)}" ${isBusy ? 'disabled' : ''}>${isBusy ? 'Restoring…' : '↺ Restore'}</button>`;
   }
 
   return `
     <div class="catalog-item" data-catalog-slug="${escapeHtml(item.slug)}">
       <div class="catalog-item-main">
-        <div class="game-icon-box game-icon-box-sm" style="background:${escapeHtml(color)}; color:${escapeHtml(onColor)};" aria-hidden="true">${escapeHtml(item.icon || '🎮')}</div>
+        <div class="game-icon-box game-icon-box-xs" style="background:${escapeHtml(color)}; color:${escapeHtml(onColor)};" aria-hidden="true">${escapeHtml(item.icon || '🎮')}</div>
         <div class="game-title-wrap">
-          <div class="game-name">${escapeHtml(item.name)}</div>
+          <div class="game-name" title="${escapeHtml(titleAttr)}">${escapeHtml(item.name)}</div>
           <div class="catalog-item-meta">
-            <span class="pill pill-neutral">${escapeHtml(item.category || 'Daily')}</span>
+            <span>${escapeHtml(item.category || 'Daily')}</span>
+            <span>·</span>
             <span class="tabular-nums">${escapeHtml(String(playerCount))} ${playerCount === 1 ? 'player' : 'players'}</span>
-            ${domain ? `<span>· ${escapeHtml(domain)}</span>` : ''}
-            ${!item.isStarter && item.createdByName ? `<span>· Added by ${escapeHtml(item.createdByName)}</span>` : ''}
+            ${!item.isStarter && item.createdByName ? `<span>· by ${escapeHtml(item.createdByName)}</span>` : ''}
           </div>
         </div>
       </div>
@@ -4696,11 +4701,61 @@ async function handleReparseGame() {
 
 // ---------- My Games & Parser Lab View ----------
 
+function renderManageGameCardHtml(game, idx, activeCount) {
+  const color = normalizeHexColor(game.color);
+  const onColor = getReadableTextColor(color);
+  const playsCount = getEntriesForGame(game.id).length;
+  const domain = getGameDomainLabel(game.url) || game.url;
+  const parserMeta = getParserMeta(game.resolvedParser?.id || game.parserId);
+  const resetSummary = getResetScheduleSummary(game);
+  const isCompeting = game.compete !== false;
+  const metaTooltip = `${domain} · ${parserMeta.name || game.parserId || 'Generic'} · 🕒 ${resetSummary}`;
+
+  const actionsHtml = game.archived
+    ? `
+      <button type="button" class="btn btn-secondary btn-xs btn-compact-act" data-action="toggle-archive-game" data-game-id="${escapeHtml(game.id)}" aria-label="Restore ${escapeHtml(game.name)}">Restore</button>
+      <button type="button" class="btn btn-ghost btn-xs btn-compact-act" data-action="edit-game" data-game-id="${escapeHtml(game.id)}" aria-label="Edit ${escapeHtml(game.name)}">Edit</button>
+      <button type="button" class="btn btn-danger-ghost btn-xs btn-icon-xs" data-action="delete-game" data-game-id="${escapeHtml(game.id)}" aria-label="Delete ${escapeHtml(game.name)}" title="Delete ${escapeHtml(game.name)}">✕</button>
+    `
+    : `
+      <button
+        type="button"
+        class="btn btn-xs btn-compact-act compete-toggle-btn ${isCompeting ? 'is-competing' : 'is-solo'}"
+        data-action="toggle-compete-game"
+        data-game-id="${escapeHtml(game.id)}"
+        aria-pressed="${isCompeting ? 'true' : 'false'}"
+        aria-label="${escapeHtml(game.name)} leaderboard competition"
+      >${isCompeting ? '🏆 On' : 'Solo'}</button>
+      <button type="button" class="btn btn-secondary btn-xs btn-icon-xs" data-action="move-game-up" data-game-id="${escapeHtml(game.id)}" ${idx === 0 ? 'disabled' : ''} aria-label="Move ${escapeHtml(game.name)} up" title="Move up">↑</button>
+      <button type="button" class="btn btn-secondary btn-xs btn-icon-xs" data-action="move-game-down" data-game-id="${escapeHtml(game.id)}" ${idx === activeCount - 1 ? 'disabled' : ''} aria-label="Move ${escapeHtml(game.name)} down" title="Move down">↓</button>
+      <button type="button" class="btn btn-secondary btn-xs btn-compact-act" data-action="edit-game" data-game-id="${escapeHtml(game.id)}" aria-label="Edit ${escapeHtml(game.name)}">Edit</button>
+      <button type="button" class="btn btn-ghost btn-xs btn-compact-act" data-action="toggle-archive-game" data-game-id="${escapeHtml(game.id)}" aria-label="Archive ${escapeHtml(game.name)}">Archive</button>
+      <button type="button" class="btn btn-danger-ghost btn-xs btn-icon-xs" data-action="delete-game" data-game-id="${escapeHtml(game.id)}" aria-label="Delete ${escapeHtml(game.name)}" title="Delete ${escapeHtml(game.name)}">✕</button>
+    `;
+
+  return `
+    <div class="manage-game-item${game.archived ? ' is-archived' : ''}" data-game-id="${escapeHtml(game.id)}">
+      <div class="manage-game-left">
+        <div class="game-icon-box game-icon-box-xs" style="background:${escapeHtml(color)}; color:${escapeHtml(onColor)};" aria-hidden="true">${escapeHtml(game.icon || '🎮')}</div>
+        <div class="game-title-wrap">
+          <div class="game-name" title="${escapeHtml(game.name)}">${escapeHtml(game.name)}</div>
+          <div class="game-meta-compact" title="${escapeHtml(metaTooltip)}">
+            ${escapeHtml(game.category || 'Daily')} · <span class="tabular-nums">${playsCount} ${playsCount === 1 ? 'play' : 'plays'}</span>${!game.archived && !isCompeting ? ' · <span class="solo-inline-tag">Solo</span>' : ''}
+          </div>
+        </div>
+      </div>
+      <div class="manage-game-actions">${actionsHtml}</div>
+    </div>
+  `;
+}
+
 function renderGamesAdminView() {
   populateGameSelects();
 
+  const activeGames = state.games.filter((g) => !g.archived);
+  const archivedGames = state.games.filter((g) => g.archived);
+
   if (els.rosterCompeteBar) {
-    const activeGames = state.games.filter((g) => !g.archived);
     const activeCount = activeGames.length;
     const competingCount = activeGames.filter((g) => g.compete !== false).length;
     if (activeCount === 0) {
@@ -4722,51 +4777,29 @@ function renderGamesAdminView() {
     if (state.games.length === 0) {
       els.manageGamesList.innerHTML = `<div class="empty-grid-card"><p class="muted-text">No games yet. Click "+ Add Game" to build your roster.</p></div>`;
     } else {
-      els.manageGamesList.innerHTML = state.games
-        .map((game, idx) => {
-          const color = normalizeHexColor(game.color);
-          const onColor = getReadableTextColor(color);
-          const playsCount = getEntriesForGame(game.id).length;
-          const domain = getGameDomainLabel(game.url) || game.url;
-          const parserMeta = getParserMeta(game.resolvedParser?.id || game.parserId);
-          const resetSummary = getResetScheduleSummary(game);
-          const isCompeting = game.compete !== false;
-          return `
-            <div class="manage-game-item${game.archived ? ' is-archived' : ''}" data-game-id="${escapeHtml(game.id)}">
-              <div class="manage-game-left">
-                <div class="game-icon-box game-icon-box-sm" style="background:${escapeHtml(color)}; color:${escapeHtml(onColor)};" aria-hidden="true">${escapeHtml(game.icon || '🎮')}</div>
-                <div class="game-title-wrap">
-                  <div class="game-name">${escapeHtml(game.name)}</div>
-                  <div class="game-meta-line">
-                    <span class="pill pill-neutral">${escapeHtml(game.category || 'Daily')}</span>
-                    <span class="muted-text tabular-nums">${escapeHtml(game.metricLabel || 'Score')} · ${playsCount} plays · ${escapeHtml(domain)}</span>
-                    <span class="pill pill-neutral">${escapeHtml(parserMeta.name || game.parserId || 'Generic')}</span>
-                    <span class="pill pill-neutral tabular-nums">🕒 ${escapeHtml(resetSummary)}</span>
-                    ${!game.archived && !isCompeting ? '<span class="pill pill-neutral">Solo only</span>' : ''}
-                    ${game.archived ? '<span class="pill pill-warning">Archived</span>' : ''}
-                  </div>
-                </div>
+      const activeHtml =
+        activeGames.length > 0
+          ? `<div class="manage-games-grid">${activeGames
+              .map((g, i) => renderManageGameCardHtml(g, i, activeGames.length))
+              .join('')}</div>`
+          : '<p class="empty-hint">All games are archived. Restore one below or add a game.</p>';
+
+      const archivedHtml =
+        archivedGames.length > 0
+          ? `
+            <details class="archived-roster-details" ${state.openArchivedRoster ? 'open' : ''}>
+              <summary class="archived-roster-summary">
+                <span>📦 Archived games <span class="tabular-nums">(${escapeHtml(String(archivedGames.length))})</span></span>
+                <span class="catalog-collection-chevron" aria-hidden="true">▾</span>
+              </summary>
+              <div class="manage-games-grid is-archived-grid">
+                ${archivedGames.map((g, i) => renderManageGameCardHtml(g, i, archivedGames.length)).join('')}
               </div>
-              <div class="manage-game-actions">
-                <button type="button" class="btn btn-secondary btn-xs" data-action="move-game-up" data-game-id="${escapeHtml(game.id)}" ${idx === 0 ? 'disabled' : ''} aria-label="Move ${escapeHtml(game.name)} up">↑</button>
-                <button type="button" class="btn btn-secondary btn-xs" data-action="move-game-down" data-game-id="${escapeHtml(game.id)}" ${idx === state.games.length - 1 ? 'disabled' : ''} aria-label="Move ${escapeHtml(game.name)} down">↓</button>
-                <button
-                  type="button"
-                  class="btn btn-xs compete-toggle-btn ${isCompeting ? 'is-competing' : 'is-solo'}"
-                  data-action="toggle-compete-game"
-                  data-game-id="${escapeHtml(game.id)}"
-                  aria-pressed="${isCompeting ? 'true' : 'false'}"
-                  aria-label="${escapeHtml(game.name)} leaderboard competition"
-                  ${game.archived ? 'disabled' : ''}
-                >${isCompeting ? '🏆 Competing' : 'Solo only'}</button>
-                <button type="button" class="btn btn-secondary btn-xs" data-action="edit-game" data-game-id="${escapeHtml(game.id)}">Edit</button>
-                <button type="button" class="btn btn-ghost btn-xs" data-action="toggle-archive-game" data-game-id="${escapeHtml(game.id)}">${game.archived ? 'Restore' : 'Archive'}</button>
-                <button type="button" class="btn btn-danger-ghost btn-xs" data-action="delete-game" data-game-id="${escapeHtml(game.id)}">Delete</button>
-              </div>
-            </div>
-          `;
-        })
-        .join('');
+            </details>
+          `
+          : '';
+
+      els.manageGamesList.innerHTML = `${activeHtml}${archivedHtml}`;
     }
   }
 
@@ -4833,14 +4866,17 @@ async function handleBulkCompeteGames(targetCompete) {
 
 async function handleReorderGame(gameId, delta) {
   const idNum = Number(gameId);
-  const index = state.games.findIndex((g) => g.id === idNum);
+  const activeGames = state.games.filter((g) => !g.archived);
+  const archivedGames = state.games.filter((g) => g.archived);
+  const index = activeGames.findIndex((g) => g.id === idNum);
   if (index === -1) return;
   const targetIndex = index + delta;
-  if (targetIndex < 0 || targetIndex >= state.games.length) return;
+  if (targetIndex < 0 || targetIndex >= activeGames.length) return;
 
-  const ids = state.games.map((g) => g.id);
-  const [moved] = ids.splice(index, 1);
-  ids.splice(targetIndex, 0, moved);
+  const activeIds = activeGames.map((g) => g.id);
+  const [moved] = activeIds.splice(index, 1);
+  activeIds.splice(targetIndex, 0, moved);
+  const ids = [...activeIds, ...archivedGames.map((g) => g.id)];
 
   try {
     await api.reorderGames(ids);
@@ -5251,6 +5287,7 @@ function enterUnauthenticatedState() {
   state.friendsCatalogTag = 'All';
   state.friendsCatalogSearch = '';
   state.openCatalogCollections = {};
+  state.openArchivedRoster = false;
   state.signupSelectedSlugs.clear();
   state.signupPickerInitialized = false;
   state.selectedHeatmapDate = null;
@@ -6030,6 +6067,16 @@ function bindEvents() {
     else if (action === 'toggle-archive-game') handleToggleArchiveGame(gameId);
     else if (action === 'delete-game') handleDeleteGame(gameId);
   });
+
+  els.manageGamesList?.addEventListener(
+    'toggle',
+    (event) => {
+      const details = event.target;
+      if (!details?.matches?.('details.archived-roster-details')) return;
+      state.openArchivedRoster = details.open;
+    },
+    true
+  );
 
   els.friendsCatalogSearch?.addEventListener('input', () => {
     state.friendsCatalogSearch = els.friendsCatalogSearch.value;

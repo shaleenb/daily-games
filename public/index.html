@@ -755,13 +755,13 @@
 
       <!-- ==================== VIEW 3: MY GAMES & PARSER LAB ==================== -->
       <section id="view-games" class="view-panel" role="tabpanel" aria-labelledby="tab-btn-games">
-        <div class="games-admin-grid">
-          <!-- Manage Games Roster -->
-          <section class="surface-card">
-            <div class="card-header-bar">
+        <div class="games-admin-stack">
+          <!-- Manage Games Roster + Hub Collections -->
+          <section class="surface-card roster-admin-card">
+            <div class="card-header-bar roster-header-bar">
               <div>
                 <h2 class="section-title">Your Game Roster</h2>
-                <p class="section-subtitle">Reorder your daily shelf, edit colors/scoring, or archive games</p>
+                <p class="section-subtitle">Reorder your shelf, toggle Leaderboard competition, or add games</p>
               </div>
               <button type="button" class="btn btn-primary btn-sm" id="btn-add-game-admin">
                 ＋ Add Game
@@ -771,20 +771,17 @@
             <div id="manage-games-list" class="manage-games-list"></div>
             <div id="friends-catalog-shelf" class="friends-catalog-shelf hidden">
               <div class="friends-catalog-head">
-                <div>
-                  <h3 class="section-title-sm">✨ Hub Game Catalog &amp; Collections</h3>
-                  <p class="section-subtitle">One-click add friends' games or explore Magnitudle &amp; FlightQ collections</p>
-                </div>
+                <h3 class="section-title-sm">✨ Hub Game Catalog &amp; Collections</h3>
                 <span id="friends-catalog-count" class="count-badge">0</span>
               </div>
-              <search class="catalog-search-controls">
+              <search class="catalog-search-controls catalog-search-inline">
                 <label for="friends-catalog-search" class="visually-hidden">Filter catalog collections</label>
                 <input
                   type="search"
                   id="friends-catalog-search"
                   name="friendsCatalogSearch"
                   class="text-input input-sm"
-                  placeholder="Filter games, tags, or URLs…"
+                  placeholder="Filter catalog games, tags, or URLs…"
                 >
                 <div id="friends-catalog-tag-bar" class="catalog-tag-bar" role="group" aria-label="Filter catalog by topic tag"></div>
               </search>
@@ -792,91 +789,96 @@
             </div>
           </section>
 
-          <!-- Backup & Restore -->
-          <section class="surface-card">
-            <div class="card-header-bar">
-              <div>
-                <h2 class="section-title">Backup &amp; Restore</h2>
-                <p class="section-subtitle">Export all games &amp; play history as JSON, or restore from a backup file</p>
-              </div>
-            </div>
+          <!-- Collapsible Utility Drawers: Backup & Parser Lab -->
+          <div class="games-utility-drawers">
+            <details class="surface-card parser-lab-drawer utility-drawer" id="backup-restore-drawer">
+              <summary class="parser-lab-summary">
+                <div class="parser-lab-summary-text">
+                  <span class="section-title">💾 Backup &amp; Restore</span>
+                  <span class="section-subtitle">Export or restore portable JSON snapshots of your games &amp; history</span>
+                </div>
+                <span class="parser-lab-chevron" aria-hidden="true">▾</span>
+              </summary>
 
-            <div class="backup-stack">
-              <div class="backup-box">
-                <h3 class="section-title-sm">Export Data</h3>
-                <p class="muted-text">Download a portable JSON snapshot of your games and score history.</p>
-                <button type="button" class="btn btn-primary" id="btn-export-json">
-                  ⬇️ Download JSON Export
-                </button>
-              </div>
-
-              <div class="backup-box">
-                <h3 class="section-title-sm">Import Data</h3>
-                <p class="muted-text">Restore from a previously exported Daily Games Hub JSON file.</p>
-                <div class="import-controls">
-                  <input type="file" id="import-file-input" accept=".json,application/json" class="file-input">
-                  <div class="import-mode-row">
-                    <label class="radio-pill">
-                      <input type="radio" name="import-mode" value="merge" checked>
-                      <span>Merge with existing</span>
-                    </label>
-                    <label class="radio-pill">
-                      <input type="radio" name="import-mode" value="replace">
-                      <span>Replace all data</span>
-                    </label>
+              <div class="parser-lab-body utility-drawer-body">
+                <div class="backup-stack">
+                  <div class="backup-box">
+                    <h3 class="section-title-sm">Export Data</h3>
+                    <p class="muted-text">Download a portable JSON snapshot of your games and score history.</p>
+                    <button type="button" class="btn btn-primary" id="btn-export-json">
+                      ⬇️ Download JSON Export
+                    </button>
                   </div>
-                  <p id="import-file-summary" class="muted-text hidden"></p>
-                  <button type="button" class="btn btn-secondary" id="btn-import-json" disabled>
-                    ⬆️ Import JSON Backup
-                  </button>
+
+                  <div class="backup-box">
+                    <h3 class="section-title-sm">Import Data</h3>
+                    <p class="muted-text">Restore from a previously exported Daily Games Hub JSON file.</p>
+                    <div class="import-controls">
+                      <input type="file" id="import-file-input" accept=".json,application/json" class="file-input">
+                      <div class="import-mode-row">
+                        <label class="radio-pill">
+                          <input type="radio" name="import-mode" value="merge" checked>
+                          <span>Merge with existing</span>
+                        </label>
+                        <label class="radio-pill">
+                          <input type="radio" name="import-mode" value="replace">
+                          <span>Replace all data</span>
+                        </label>
+                      </div>
+                      <p id="import-file-summary" class="muted-text hidden"></p>
+                      <button type="button" class="btn btn-secondary" id="btn-import-json" disabled>
+                        ⬆️ Import JSON Backup
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
-        </div>
+            </details>
 
-        <!-- Collapsible Custom Parser Lab -->
-        <details class="surface-card parser-lab-drawer" id="parser-lab-drawer">
-          <summary class="parser-lab-summary">
-            <div class="parser-lab-summary-text">
-              <span class="section-title">🧪 Custom Parser Lab</span>
-              <span class="section-subtitle">Inspect how pasted share results parse or generate a custom parser request for chat</span>
-            </div>
-            <span class="parser-lab-chevron" aria-hidden="true">▾</span>
-          </summary>
+            <!-- Collapsible Custom Parser Lab -->
+            <details class="surface-card parser-lab-drawer utility-drawer" id="parser-lab-drawer">
+              <summary class="parser-lab-summary">
+                <div class="parser-lab-summary-text">
+                  <span class="section-title">🧪 Custom Parser Lab</span>
+                  <span class="section-subtitle">Inspect how pasted share results parse or generate a custom parser request for chat</span>
+                </div>
+                <span class="parser-lab-chevron" aria-hidden="true">▾</span>
+              </summary>
 
-          <div class="parser-lab-body">
-            <div class="card-header-bar">
-              <div class="workbench-meta-strip" id="workbench-meta-strip"></div>
-              <button type="button" class="btn btn-accent-outline btn-sm" id="btn-copy-parser-request">
-                📋 Copy Parser Request for Chat
-              </button>
-            </div>
+              <div class="parser-lab-body">
+                <div class="card-header-bar">
+                  <div class="workbench-meta-strip" id="workbench-meta-strip"></div>
+                  <button type="button" class="btn btn-accent-outline btn-sm" id="btn-copy-parser-request">
+                    📋 Copy Parser Request for Chat
+                  </button>
+                </div>
 
-            <div class="games-admin-grid">
-              <div class="workbench-controls">
-                <label class="field-group">
-                  <span class="field-label">Target Game</span>
-                  <select id="workbench-game-select" class="select-input"></select>
-                </label>
-                <label class="field-group">
-                  <span class="field-label">Sample Share Text</span>
-                  <textarea
-                    id="workbench-sample-text"
-                    class="textarea-code"
-                    rows="5"
-                    placeholder="Paste an authentic share result from this game to inspect ParsedGameResult JSON..."
-                  ></textarea>
-                </label>
+                <div class="games-admin-grid">
+                  <div class="workbench-controls">
+                    <label class="field-group">
+                      <span class="field-label">Target Game</span>
+                      <select id="workbench-game-select" class="select-input"></select>
+                    </label>
+                    <label class="field-group">
+                      <span class="field-label">Sample Share Text</span>
+                      <textarea
+                        id="workbench-sample-text"
+                        class="textarea-code"
+                        rows="5"
+                        placeholder="Paste an authentic share result from this game to inspect ParsedGameResult JSON..."
+                      ></textarea>
+                    </label>
+                  </div>
+
+                  <div class="workbench-output-wrap">
+                    <span class="field-label">Extracted Result Preview</span>
+                    <pre id="workbench-json-output" class="code-preview" tabindex="0"><code></code></pre>
+                  </div>
+                </div>
               </div>
-
-              <div class="workbench-output-wrap">
-                <span class="field-label">Extracted Result Preview</span>
-                <pre id="workbench-json-output" class="code-preview" tabindex="0"><code></code></pre>
-              </div>
-            </div>
+            </details>
           </div>
-        </details>
+        </div>
       </section>
     </main>
   </div>
