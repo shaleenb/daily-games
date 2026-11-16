@@ -1,7 +1,8 @@
 import { extractEmojiGrid, extractExplicitDate, extractPuzzleId } from '../utils.js';
 
 const MAGNITUDLE_DOMAIN_REGEX = /\bmagnitudle\.com\b/i;
-const MAGNITUDLE_NAME_REGEX = /\bmagnitudle\b|\bsize\s+it\s+up\b/i;
+const MAGNITUDLE_NAME_REGEX =
+  /\bmagnitudle\b|\bsize\s+it\s+up\b|\bweigh\s+it\s+up\b|\bdaily\s+magnitudle\b/i;
 const TILE_SCORE_ROW_REGEX =
   /^\s*((?:[\u{1F7E5}-\u{1F7EB}\u2B1B\u2B1C]\uFE0F?[ \t]*){2,})[ \t]*(\d{1,3}(?:\.\d+)?)\s*$/u;
 
@@ -62,14 +63,31 @@ function deduplicateTileRows(rows) {
 export const magnitudleParser = {
   id: 'magnitudle',
   name: 'Magnitudle',
-  version: 1,
+  version: 2,
   isCustomParser: true,
-  supportedSlugs: ['magnitudle', 'size-it-up', 'sizeitup'],
+  supportedSlugs: [
+    'magnitudle',
+    'size-it-up',
+    'sizeitup',
+    'weigh-it-up',
+    'weighitup',
+    'magnitudle-daily',
+  ],
   supportedDomains: ['magnitudle.com'],
 
   canParse(rawText) {
     if (typeof rawText !== 'string') return false;
     return MAGNITUDLE_DOMAIN_REGEX.test(rawText) || MAGNITUDLE_NAME_REGEX.test(rawText);
+  },
+
+  detectGameSlug(rawText) {
+    if (typeof rawText !== 'string') return null;
+    if (/weigh[- ]it[- ]up/i.test(rawText)) return 'weigh-it-up';
+    if (/magnitudle\.com\/daily\b|\bdaily\s+(?:magnitudle\s+)?question\b/i.test(rawText)) {
+      return 'magnitudle-daily';
+    }
+    if (/size[- ]it[- ]up/i.test(rawText)) return 'magnitudle';
+    return null;
   },
 
   parse(rawText, _gameContext = {}) {
@@ -115,9 +133,10 @@ export const magnitudleParser = {
 
     let primaryValue = null;
     let maxScore = null;
+    let isPercent = false;
 
     const labeledScore =
-      /\b(?:score|total|points|pts)\s*[:=\-]?\s*(\d[\d,]*(?:\.\d+)?)(?:\s*\/\s*(\d[\d,]*(?:\.\d+)?))?\b/i.exec(
+      /\b(?:score|total|points|pts|accuracy)\s*[:=\-]?\s*(\d[\d,]*(?:\.\d+)?)(?:\s*\/\s*(\d[\d,]*(?:\.\d+)?))?\b(?!(?:\.\d|\s*(?:%|\/\d)))/i.exec(
         scanText
       );
     if (labeledScore) {
@@ -136,7 +155,15 @@ export const magnitudleParser = {
     }
 
     if (primaryValue === null) {
-      const standalone = /(?<![\d.:#])\b(\d[\d,]*(?:\.\d+)?)\b/.exec(scanText);
+      const pctMatch = /\b(\d{1,3}(?:\.\d+)?)\s*%/.exec(scanText);
+      if (pctMatch) {
+        primaryValue = parseCleanNumber(pctMatch[1]);
+        isPercent = primaryValue !== null;
+      }
+    }
+
+    if (primaryValue === null) {
+      const standalone = /(?<![\d.:#])\b(\d[\d,]*(?:\.\d+)?)\b(?![\s]*%)/.exec(scanText);
       if (standalone) {
         primaryValue = parseCleanNumber(standalone[1]);
       }
@@ -152,10 +179,13 @@ export const magnitudleParser = {
 
     let displayValue = 'Played';
     if (primaryValue !== null) {
-      displayValue =
-        maxScore !== null && maxScore > 0
-          ? `${formatScoreToken(primaryValue)}/${formatScoreToken(maxScore)}`
-          : formatScoreToken(primaryValue);
+      if (isPercent) {
+        displayValue = `${formatScoreToken(primaryValue)}%`;
+      } else if (maxScore !== null && maxScore > 0) {
+        displayValue = `${formatScoreToken(primaryValue)}/${formatScoreToken(maxScore)}`;
+      } else {
+        displayValue = formatScoreToken(primaryValue);
+      }
     } else if (solved === false) {
       displayValue = 'DNF';
     }
@@ -175,7 +205,7 @@ export const magnitudleParser = {
 
     return {
       parserId: 'magnitudle',
-      parserVersion: 1,
+      parserVersion: 2,
       isCustomParser: true,
       completed: true,
       solved,

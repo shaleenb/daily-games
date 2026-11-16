@@ -186,6 +186,7 @@ async function handleApiRequest(request, env, url, pathname) {
       });
     }
     const status = await db.getAuthBootstrapStatus();
+    const signupCatalog = await db.listPublicSignupCatalog();
     return jsonResponse(200, {
       authenticated: false,
       user: null,
@@ -194,6 +195,7 @@ async function handleApiRequest(request, env, url, pathname) {
         gamesCount: status.unclaimedGamesCount,
         entriesCount: status.unclaimedEntriesCount,
       },
+      signupCatalog,
     });
   }
 
@@ -210,6 +212,17 @@ async function handleApiRequest(request, env, url, pathname) {
     if (!passwordCheck.valid) {
       throw new ValidationError(passwordCheck.error);
     }
+    if (body?.competingSlugs !== undefined) {
+      if (
+        !Array.isArray(body.competingSlugs) ||
+        body.competingSlugs.some((s) => typeof s !== 'string')
+      ) {
+        throw new ValidationError('competingSlugs must be an array of strings');
+      }
+      if (body.competingSlugs.length === 0) {
+        throw new ValidationError('Please select at least one valid game to compete in');
+      }
+    }
 
     const email = normalizeEmail(body.email);
     if (await db.getUserByEmail(email)) {
@@ -222,6 +235,7 @@ async function handleApiRequest(request, env, url, pathname) {
       email,
       passwordHash: hashHex,
       passwordSalt: saltHex,
+      competingSlugs: body?.competingSlugs,
     });
 
     const { rawToken, tokenHash, sessionId, expiresAt } = await generateSessionToken();
@@ -376,7 +390,12 @@ async function handleApiRequest(request, env, url, pathname) {
 
   if (method === 'POST' && pathname === '/api/catalog/subscribe') {
     const body = await readJsonBody(request);
-    const result = await db.subscribeCatalogGame(body?.slug, userId);
+    if (body?.compete !== undefined && typeof body.compete !== 'boolean') {
+      throw new ValidationError('compete must be a boolean');
+    }
+    const result = await db.subscribeCatalogGame(body?.slug, userId, {
+      compete: body?.compete ?? true,
+    });
     return jsonResponse(result.status === 'subscribed' ? 201 : 200, result);
   }
 

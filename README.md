@@ -6,16 +6,23 @@ Live production deployment: https://daily-games-hub.shaleenb.workers.dev
 
 ## Features
 
-- **10 Built-in Starter Games**: Clues by Sam (`🕵️`), Krillion (`🦑`), Farflung (`🌍`), Perceptle (`👁️`), PricePoint (`🏷️`), Fermi (`🧮`), Magnitudle (`📏`), Plain (`✈️`), TimeGuessr (`🕰️`), and Eraly (`⏳`), plus custom game creation and timezone-aware puzzle reset tracking (`local`, `UTC`, IANA timezones).
-- **Shared Hub Game Catalog**: Browse games added by other players on the hub and subscribe (or restore archived games) with one click, backed by canonical URL deduplication.
+- **36 Built-in Catalog Games (10 Core Starters + 26 Optional Collections)**:
+  - **10 Starters**: Clues by Sam (`🕵️`), Krillion (`🦑`), Farflung (`🌍`), Perceptle (`👁️`), PricePoint (`🏷️`), Fermi (`🧮`), **Size It Up** (`📏`, `magnitudle.com/size-it-up`), Plain (`✈️`), TimeGuessr (`🕰️`), and Eraly (`⏳`), plus custom game creation and timezone-aware puzzle reset tracking (`local`, `UTC`, IANA timezones).
+  - **Optional Collections**: **Magnitudle** (`Weigh It Up`, `Daily Question`) and **FlightQ** (24 games including `PassportQ`, `SkyQ`, `AirportQ`, `AirlineQ`, `PlaneQ`, `Strata`, `Mapfold`, `CityQ`, `TransitQ`, `RailQ`, etc.), organized by collapsible Collections and Category/Topic tag filter pills.
+- **Selective Competitive Sign-Up & Hub Game Catalog**:
+  - Choose which games to add and compete in during sign-up (`Select All` / `Clear` + collapsible optional Collections), and toggle any game between **🏆 Competing** and **Solo only** anytime in `My Games`.
+  - Browse all built-in and friend-added games in the Shared Hub Catalog with search, tag filters, collapsible collections, and 1-click subscribe/restore, backed by canonical URL deduplication.
 - **Smart Share-Text Auto-Parsing & Universal Grids** (`shared/parsers/`):
   - Paste any puzzle share text to auto-detect the game (`POST /api/detect`, `POST /api/entries/parse-preview`).
-  - **Clues by Sam**: Parses solve time, date, puzzle ID, emoji grid stats, and difficulty (`Easy`, `Medium`, `Tricky`, `Hard`, `Brutal`), with manual difficulty override/clear, **Solve Time by Difficulty** breakdown chart, and difficulty-filtered stats/head-to-head leaderboards while keeping streaks unified.
+  - **Clues by Sam**: Parses solve time, date, puzzle ID, emoji grid stats (`🟩`, `🟨`, `🟡`, `🟠`), weighted accuracy penalty metrics, and difficulty (`Easy`, `Medium`, `Tricky`, `Hard`, `Brutal`), with manual difficulty override/clear, **Solve Time by Difficulty** breakdown chart, and difficulty-filtered stats/head-to-head leaderboards while keeping streaks unified.
   - **Perceptle**: Parses grade, overall score, and all 5 round scores (`🔢 Count`, `🎯 Track`, `📐 Angle`, `🥁 Tempo`, `✂️ Split`), supports direct 5-round numeric input/editing, and renders a dual-bar (`Latest` vs `Average`) round breakdown chart.
-  - **Fermi**, **Magnitudle** (with double-paste deduplication), **Plain**, **TimeGuessr**, **Eraly** (`eraly.io` time-band decoding), **Wordle**, plus a generic fallback parser for numbers, durations, fractions, percentages, dates, puzzle IDs, and hybrid share grids displayed in Today tickets, Parse Preview, Stats History, and unlocked Leaderboard cells.
-- **Multi-Player Leaderboard & Arcade Points**:
+  - **FlightQ & Magnitudle**: Dedicated `passportqParser`, `flightqParser`, and `magnitudleParser` (Size It Up + optional Magnitudle games with double-paste deduplication).
+  - **Fermi**, **Plain**, **TimeGuessr**, **Eraly** (`eraly.io` time-band decoding), **Wordle**, plus a generic fallback parser for numbers, durations, fractions, percentages, dates, puzzle IDs, and hybrid share grids displayed in Today tickets, Parse Preview, Stats History, and unlocked Leaderboard cells.
+- **Selective Competitive Leaderboard & Accuracy Ranking**:
   - Today's Matrix with spoiler protection until you clear a game for the active cycle.
-  - Sortable Overall Standings and Gamewise Head-to-Head tables (`aria-sort`), expandable **Arcade Points** scoring rules (`3` / `2` / `1` pts using Olympic 1-2-2-4 ties), and `Today` (`1d`), `7d`, `30d`, and `All` windows.
+  - Viewer-scoped standings, Arcade Points (`3` / `2` / `1` pts using Olympic 1-2-2-4 ties), medals, and streaks filtered to your active **Competing** games (keeping `Solo only` games on Today/Stats without affecting friend leaderboards).
+  - **Clues by Sam Accuracy-First Ranking**: Ranks solves by weighted penalty first (`🟩 = 0`, `🟨 mistake = 1`, `🟡 hint = 2`, `🟠 double hint = 3` penalty points), breaking ties by faster solve time.
+  - Sortable Overall Standings and Gamewise Head-to-Head tables (`aria-sort`), expandable **Arcade Points** scoring rules, and `Today` (`1d`), `7d`, `30d`, and `All` windows.
 - **Performance Architecture**:
   - Single-call authenticated boot (`/api/bootstrap` returning `games`, `entries`, `catalog`, and Today summaries), precomputed `gameBoardsBySlug` leaderboard payload, and client-side stats calculation via shared pure `shared/stats.js` for zero-network tab/game/window/difficulty switching.
   - Cloudflare Worker isolate schema memoization (`WeakSet`), 1-query cold fast-path against `schema_migrations`, and single-round-trip `d1.batch` queries in `worker/db-d1.js`, plus `<link rel="modulepreload">` and below-the-fold `content-visibility: auto`.

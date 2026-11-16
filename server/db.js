@@ -2,11 +2,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { STARTER_GAMES, normalizeEmail } from '../shared/auth-crypto.js';
+import {
+  STARTER_GAMES,
+  OPTIONAL_CATALOG_GAMES,
+  BUILTIN_CATALOG_GAMES,
+  BUILTIN_CATALOG_BY_SLUG,
+  BUILTIN_CATALOG_SLUG_SET,
+  STARTER_SLUG_SET,
+  enrichGameMetadata,
+  normalizeEmail,
+} from '../shared/auth-crypto.js';
 import {
   GENERIC_PARSER,
   PERCEPTLE_ROUNDS,
   normalizeDifficultyLabel,
+  analyzeCluesBySamGrid,
   getParserById,
   getParserForGame,
   parseForGame,
@@ -24,7 +34,6 @@ export const DEFAULT_DB_PATH = path.join(PROJECT_ROOT, 'data', 'daily-games.db')
 
 export const VALID_METRIC_FORMATS = new Set(['number', 'duration_sec', 'percent', 'fraction']);
 export const VALID_METRIC_DIRECTIONS = new Set(['higher_is_better', 'lower_is_better']);
-const STARTER_SLUG_SET = new Set(STARTER_GAMES.map((g) => g.slug));
 
 export class ValidationError extends Error {
   constructor(message) {
@@ -278,11 +287,13 @@ function mapGameRow(rawRow) {
     resetTime: String(r.reset_time ?? '00:00'),
     sortOrder: Number(r.sort_order),
     archived: Boolean(r.archived),
+    compete: r.compete === undefined || r.compete === null ? true : Boolean(r.compete),
     createdAt: String(r.created_at),
   };
   const resolved = serializeResolvedParser(getParserForGame(base));
   return {
     ...base,
+    ...enrichGameMetadata(base),
     resolvedParser: resolved,
   };
 }
@@ -370,6 +381,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       reset_time TEXT NOT NULL DEFAULT '00:00',
       sort_order INTEGER NOT NULL DEFAULT 0,
       archived INTEGER NOT NULL DEFAULT 0,
+      compete INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       UNIQUE(user_id, slug)
     );
@@ -573,6 +585,182 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
 
         if (changed) {
           updateMetaStmt.run(JSON.stringify(merged), Number(r.id));
+          updated += 1;
+        }
+      }
+      sqlite.exec('COMMIT;');
+    } catch (err) {
+      try {
+        sqlite.exec('ROLLBACK;');
+      } catch {
+        // ignore rollback failure
+      }
+      throw err;
+    }
+
+    return updated;
+  }
+
+  function backfillCluesBySamAccuracyEntries() {
+    const rows = sqlite
+      .prepare(`
+        SELECT
+          e.id, e.raw_text, e.parser_id, e.parser_version,
+          e.primary_value, e.display_value, e.puzzle_id,
+          e.metadata_json, e.manual_override, e.play_date,
+          g.slug AS game_slug, g.name AS game_name, g.url AS game_url
+        FROM entries e
+        JOIN games g ON g.id = e.game_id
+        WHERE g.slug = 'cluesbysam' OR g.parser_id = 'cluesbysam' OR e.parser_id = 'cluesbysam'
+      `)
+      .all();
+
+    if (rows.length === 0) return 0;
+
+    const cluesParser = getParserById('cluesbysam');
+    const updateEntryStmt = sqlite.prepare(`
+      UPDATE entries SET
+        parser_id = ?, parser_version = ?,
+        primary_value = ?, display_value = ?, puzzle_id = ?,
+        metadata_json = ?
+      WHERE id = ?
+    `);
+    const updateMetaOnlyStmt = sqlite.prepare('UPDATE entries SET metadata_json = ? WHERE id = ?');
+    let updated = 0;
+
+    sqlite.exec('BEGIN IMMEDIATE;');
+    try {
+      for (const rawRow of rows) {
+        const r = { ...rawRow };
+        const existingMeta = safeJsonParse(r.metadata_json, {});
+        const merged =
+          existingMeta && typeof existingMeta === 'object' && !Array.isArray(existingMeta)
+            ? { ...existingMeta }
+            : {};
+
+        const rawText = String(r.raw_text ?? '');
+        const hasRawText = rawText.trim().length > 0;
+        const gameCtx = {
+          slug: String(r.game_slug || 'cluesbysam'),
+          name: String(r.game_name || 'Clues by Sam'),
+          url: String(r.game_url || 'https://cluesbysam.com'),
+          parserId: 'cluesbysam',
+        };
+        const parsed =
+          hasRawText && cluesParser
+            ? cluesParser.parse(rawText, gameCtx, String(r.play_date || ''))
+            : null;
+        const parsedMeta = parsed?.metadata && typeof parsed.metadata === 'object' ? parsed.metadata : {};
+
+        if (!merged.difficultyOverride && !normalizeDifficultyLabel(merged.difficulty)) {
+          const parsedDiff = normalizeDifficultyLabel(parsedMeta.difficulty);
+          if (parsedDiff) {
+            merged.difficulty = parsedDiff;
+          }
+        }
+        if (
+          merged.seconds === undefined &&
+          parsedMeta.seconds !== undefined &&
+          parsedMeta.seconds !== null
+        ) {
+          merged.seconds = parsedMeta.seconds;
+        }
+
+        const candidateGrid =
+          (typeof parsedMeta.emojiGrid === 'string' && parsedMeta.emojiGrid.trim()
+            ? parsedMeta.emojiGrid
+            : null) ||
+          (typeof parsedMeta.grid === 'string' && parsedMeta.grid.trim()
+            ? parsedMeta.grid
+            : null) ||
+          (typeof merged.emojiGrid === 'string' && merged.emojiGrid.trim()
+            ? merged.emojiGrid
+            : null) ||
+          (typeof merged.grid === 'string' && merged.grid.trim() ? merged.grid : null);
+
+        const acc = candidateGrid ? analyzeCluesBySamGrid(candidateGrid) : null;
+        if (acc) {
+          for (const key of [
+            'emojiGrid',
+            'grid',
+            'gridRows',
+            'gridCols',
+            'cleanCount',
+            'greenCount',
+            'yellowCount',
+            'mistakeCount',
+            'singleHintCount',
+            'doubleHintCount',
+            'hintCount',
+            'totalHintWeight',
+            'totalTiles',
+            'accuracyPenalty',
+            'isPerfect',
+            'accuracySummary',
+          ]) {
+            merged[key] = acc[key];
+          }
+        }
+
+        const nextMetaJson = JSON.stringify(merged);
+        const prevMetaJson = String(r.metadata_json ?? '{}');
+        const isManual = Boolean(r.manual_override);
+
+        if (isManual) {
+          if (nextMetaJson !== prevMetaJson) {
+            updateMetaOnlyStmt.run(nextMetaJson, Number(r.id));
+            updated += 1;
+          }
+          continue;
+        }
+
+        const prevPrimaryValue =
+          r.primary_value === null || r.primary_value === undefined
+            ? null
+            : Number(r.primary_value);
+        const prevDisplayValue = r.display_value ?? null;
+        const prevPuzzleId = r.puzzle_id ?? null;
+
+        let nextParserId = String(r.parser_id ?? 'generic');
+        let nextParserVersion = Number(r.parser_version ?? 1);
+        let nextPrimaryValue = prevPrimaryValue;
+        let nextDisplayValue = prevDisplayValue;
+        let nextPuzzleId = prevPuzzleId;
+
+        if (parsed && cluesParser) {
+          nextParserId = parsed.parserId || cluesParser.id;
+          nextParserVersion = Number(parsed.parserVersion || cluesParser.version || 3);
+          if (
+            nextPrimaryValue === null &&
+            parsed.primaryValue !== null &&
+            parsed.primaryValue !== undefined
+          ) {
+            nextPrimaryValue = parsed.primaryValue;
+            nextDisplayValue = parsed.displayValue ?? prevDisplayValue;
+          }
+          if (!nextPuzzleId && parsed.puzzleId) {
+            nextPuzzleId = parsed.puzzleId;
+          }
+        }
+
+        const changed =
+          nextMetaJson !== prevMetaJson ||
+          nextParserId !== String(r.parser_id ?? 'generic') ||
+          nextParserVersion !== Number(r.parser_version ?? 1) ||
+          nextPrimaryValue !== prevPrimaryValue ||
+          nextDisplayValue !== prevDisplayValue ||
+          nextPuzzleId !== prevPuzzleId;
+
+        if (changed) {
+          updateEntryStmt.run(
+            nextParserId,
+            nextParserVersion,
+            nextPrimaryValue,
+            nextDisplayValue,
+            nextPuzzleId,
+            nextMetaJson,
+            Number(r.id),
+          );
           updated += 1;
         }
       }
@@ -906,6 +1094,9 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
     if (!gameCols.has('reset_time')) {
       sqlite.exec("ALTER TABLE games ADD COLUMN reset_time TEXT NOT NULL DEFAULT '00:00';");
     }
+    if (!gameCols.has('compete')) {
+      sqlite.exec('ALTER TABLE games ADD COLUMN compete INTEGER NOT NULL DEFAULT 1;');
+    }
 
     const refreshedGameCols = new Set(
       sqlite.prepare('PRAGMA table_info(games)').all().map((c) => c.name),
@@ -942,6 +1133,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
             reset_time TEXT NOT NULL DEFAULT '00:00',
             sort_order INTEGER NOT NULL DEFAULT 0,
             archived INTEGER NOT NULL DEFAULT 0,
+            compete INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             UNIQUE(user_id, slug)
           );
@@ -949,12 +1141,12 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
           INSERT INTO games_new (
             id, user_id, name, slug, url, icon, color, category,
             metric_label, metric_format, metric_direction,
-            parser_id, reset_timezone, reset_time, sort_order, archived, created_at
+            parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
           )
           SELECT
             id, ${hasGameUserId ? 'user_id' : 'NULL'}, name, slug, url, icon, color, category,
             metric_label, metric_format, metric_direction,
-            parser_id, reset_timezone, reset_time, sort_order, archived, created_at
+            parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
           FROM games;
 
           CREATE TABLE entries_new (
@@ -1073,7 +1265,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         created_by_user_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    for (const g of STARTER_GAMES) {
+    for (const g of BUILTIN_CATALOG_GAMES) {
       seedCatalogStmt.run(
         g.slug,
         g.name,
@@ -1192,9 +1384,101 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       );
       markMigrationStmt.run(eralyMigrationId, now);
     }
+
+    const wave2aMigrationId = 'clues_accuracy_sizeitup_and_collections_v1';
+    if (!hasMigrationStmt.get(wave2aMigrationId)) {
+      sqlite.exec(`
+        UPDATE games
+        SET name = 'Size It Up',
+            url = 'https://magnitudle.com/size-it-up',
+            category = 'Estimation',
+            parser_id = 'magnitudle'
+        WHERE slug = 'magnitudle' AND name IN ('Magnitudle', 'Size It Up');
+      `);
+      sqlite
+        .prepare(`
+          UPDATE game_catalog
+          SET name = 'Size It Up',
+              url = 'https://magnitudle.com/size-it-up',
+              category = 'Estimation',
+              parser_id = 'magnitudle',
+              updated_at = ?
+          WHERE slug = 'magnitudle'
+        `)
+        .run(now);
+      for (const g of OPTIONAL_CATALOG_GAMES) {
+        seedCatalogStmt.run(
+          g.slug,
+          g.name,
+          g.url,
+          g.icon,
+          g.color,
+          g.category,
+          g.metricLabel,
+          g.metricFormat,
+          g.metricDirection,
+          g.parserId,
+          g.resetTimezone,
+          g.resetTime,
+          null,
+          now,
+          now,
+        );
+      }
+      backfillCluesBySamAccuracyEntries();
+      markMigrationStmt.run(wave2aMigrationId, now);
+    }
   }
 
   migrateLegacySchema();
+
+  function normalizeCompetingSlugsInput(competingSlugs) {
+    if (competingSlugs === undefined) return null;
+    if (!Array.isArray(competingSlugs)) {
+      throw new ValidationError('competingSlugs must be an array of game slugs');
+    }
+    const catRows = sqlite.prepare('SELECT slug FROM game_catalog').all();
+    const validCatalogSlugs = new Set([
+      ...BUILTIN_CATALOG_BY_SLUG.keys(),
+      ...catRows.map((r) => String(r.slug)),
+    ]);
+    const seen = new Set();
+    const out = [];
+    for (const raw of competingSlugs) {
+      if (typeof raw !== 'string') continue;
+      const s = slugify(raw.trim());
+      if (!s || seen.has(s) || !validCatalogSlugs.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    if (out.length === 0) {
+      throw new ValidationError('Please select at least one valid game to compete in');
+    }
+    return out;
+  }
+
+  function resolveGameTemplateForSlug(slug) {
+    const builtin = BUILTIN_CATALOG_BY_SLUG.get(slug);
+    const catRow = sqlite.prepare('SELECT * FROM game_catalog WHERE slug = ?').get(slug);
+    if (!builtin && !catRow) return null;
+    const c = catRow ? { ...catRow } : null;
+    return {
+      name: String(c?.name || builtin?.name || slug),
+      slug,
+      url: String(c?.url || builtin?.url || ''),
+      icon: String(c?.icon || builtin?.icon || '🎮'),
+      color: String(c?.color || builtin?.color || '#6366f1'),
+      category: String(c?.category || builtin?.category || 'Daily'),
+      metricLabel: String(c?.metric_label || builtin?.metricLabel || 'Score'),
+      metricFormat: String(c?.metric_format || builtin?.metricFormat || 'number'),
+      metricDirection: String(
+        c?.metric_direction || builtin?.metricDirection || 'higher_is_better',
+      ),
+      parserId: String(c?.parser_id || builtin?.parserId || 'auto'),
+      resetTimezone: String(c?.reset_timezone ?? builtin?.resetTimezone ?? 'local'),
+      resetTime: String(c?.reset_time ?? builtin?.resetTime ?? '00:00'),
+    };
+  }
 
   function insertStarterGamesForUser(userId) {
     const now = new Date().toISOString();
@@ -1202,8 +1486,8 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       INSERT INTO games (
         user_id, name, slug, url, icon, color, category,
         metric_label, metric_format, metric_direction,
-        parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const g of STARTER_GAMES) {
@@ -1223,21 +1507,76 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         g.resetTime,
         g.sortOrder,
         0,
+        1,
         now,
       );
     }
   }
 
-  function seedStarterGamesForUser(userId) {
+  function seedStarterGamesForUser(userId, competingSlugs = undefined) {
     const uid = parsePositiveInt(userId, 'userId');
+    const selectedSlugs = normalizeCompetingSlugsInput(competingSlugs);
     const unclaimedCount = Number(
       sqlite.prepare('SELECT COUNT(*) AS count FROM games WHERE user_id IS NULL').get().count,
     );
+
+    const insertSelectedStmt = sqlite.prepare(`
+      INSERT INTO games (
+        user_id, name, slug, url, icon, color, category,
+        metric_label, metric_format, metric_direction,
+        parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
     if (unclaimedCount > 0) {
       sqlite.prepare('UPDATE games SET user_id = ? WHERE user_id IS NULL').run(uid);
       sqlite.prepare('UPDATE entries SET user_id = ? WHERE user_id IS NULL').run(uid);
       syncStarterGamesForUser(uid, { appendSlugs: new Set() });
+
+      if (selectedSlugs !== null) {
+        const selectedSet = new Set(selectedSlugs);
+        const existingUserGames = sqlite
+          .prepare('SELECT id, slug FROM games WHERE user_id = ?')
+          .all(uid);
+        const existingSlugSet = new Set(existingUserGames.map((r) => String(r.slug)));
+        const setCompeteStmt = sqlite.prepare(
+          'UPDATE games SET compete = ? WHERE id = ? AND user_id = ?',
+        );
+        for (const row of existingUserGames) {
+          setCompeteStmt.run(selectedSet.has(String(row.slug)) ? 1 : 0, Number(row.id), uid);
+        }
+
+        const maxOrderRow = sqlite
+          .prepare('SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM games WHERE user_id = ?')
+          .get(uid);
+        let nextOrder = Number(maxOrderRow.max_order) + 1;
+        const now = new Date().toISOString();
+        for (const slug of selectedSlugs) {
+          if (existingSlugSet.has(slug)) continue;
+          const tpl = resolveGameTemplateForSlug(slug);
+          if (!tpl) continue;
+          insertSelectedStmt.run(
+            uid,
+            tpl.name,
+            tpl.slug,
+            tpl.url,
+            tpl.icon,
+            tpl.color,
+            tpl.category,
+            tpl.metricLabel,
+            tpl.metricFormat,
+            tpl.metricDirection,
+            tpl.parserId,
+            tpl.resetTimezone,
+            tpl.resetTime,
+            nextOrder,
+            0,
+            1,
+            now,
+          );
+          nextOrder += 1;
+        }
+      }
       return;
     }
 
@@ -1245,11 +1584,119 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       sqlite.prepare('SELECT COUNT(*) AS count FROM games WHERE user_id = ?').get(uid).count,
     );
     if (userGamesCount === 0) {
-      insertStarterGamesForUser(uid);
+      if (selectedSlugs === null) {
+        insertStarterGamesForUser(uid);
+      } else {
+        const now = new Date().toISOString();
+        let nextOrder = 1;
+        for (const slug of selectedSlugs) {
+          const tpl = resolveGameTemplateForSlug(slug);
+          if (!tpl) continue;
+          insertSelectedStmt.run(
+            uid,
+            tpl.name,
+            tpl.slug,
+            tpl.url,
+            tpl.icon,
+            tpl.color,
+            tpl.category,
+            tpl.metricLabel,
+            tpl.metricFormat,
+            tpl.metricDirection,
+            tpl.parserId,
+            tpl.resetTimezone,
+            tpl.resetTime,
+            nextOrder,
+            0,
+            1,
+            now,
+          );
+          nextOrder += 1;
+        }
+      }
     }
   }
 
-  function registerUser({ name, email, passwordHash, passwordSalt }) {
+  function listPublicSignupCatalog() {
+    const starterIndexBySlug = new Map(STARTER_GAMES.map((g, idx) => [g.slug, idx]));
+    const optionalIndexBySlug = new Map(OPTIONAL_CATALOG_GAMES.map((g, idx) => [g.slug, idx]));
+    const catalogRows = sqlite.prepare('SELECT * FROM game_catalog').all();
+
+    const playerCounts = new Map();
+    const competingCounts = new Map();
+    const countRows = sqlite
+      .prepare(`
+        SELECT
+          slug,
+          COUNT(DISTINCT user_id) AS player_count,
+          COUNT(DISTINCT CASE WHEN compete != 0 THEN user_id END) AS competing_count
+        FROM games
+        WHERE user_id IS NOT NULL AND archived = 0
+        GROUP BY slug
+      `)
+      .all();
+    for (const cr of countRows) {
+      const s = String(cr.slug);
+      playerCounts.set(s, Number(cr.player_count || 0));
+      competingCounts.set(s, Number(cr.competing_count || 0));
+    }
+
+    const mapped = catalogRows.map((raw) => {
+      const r = { ...raw };
+      const slug = String(r.slug);
+      const base = {
+        slug,
+        name: String(r.name),
+        url: String(r.url),
+        icon: String(r.icon),
+        color: String(r.color),
+        category: String(r.category),
+        metricLabel: String(r.metric_label),
+        metricFormat: String(r.metric_format),
+        metricDirection: String(r.metric_direction),
+      };
+      const meta = enrichGameMetadata(base);
+      const playerCount = playerCounts.get(slug) || 0;
+      const competingCount = competingCounts.get(slug) || 0;
+      const hasCreator = r.created_by_user_id !== null && r.created_by_user_id !== undefined;
+      const isFriendAdded =
+        !meta.isStarter && (hasCreator || !meta.isOptional || playerCount > 0);
+
+      return {
+        ...base,
+        ...meta,
+        isFriendAdded,
+        playerCount,
+        competingCount,
+      };
+    });
+
+    mapped.sort((a, b) => {
+      const groupRank = (item) => {
+        if (item.isStarter) return 0;
+        if (item.isFriendAdded) return 1;
+        return 2;
+      };
+      const ga = groupRank(a);
+      const gb = groupRank(b);
+      if (ga !== gb) return ga - gb;
+
+      if (ga === 0) {
+        return (starterIndexBySlug.get(a.slug) ?? 999) - (starterIndexBySlug.get(b.slug) ?? 999);
+      }
+      if (ga === 1) {
+        return b.playerCount - a.playerCount || a.name.localeCompare(b.name);
+      }
+      const oa = optionalIndexBySlug.get(a.slug) ?? 9999;
+      const ob = optionalIndexBySlug.get(b.slug) ?? 9999;
+      if (oa !== ob) return oa - ob;
+      return a.name.localeCompare(b.name);
+    });
+
+    return mapped;
+  }
+
+  function registerUser({ name, email, passwordHash, passwordSalt, competingSlugs = undefined }) {
     const normalized = normalizeEmail(email);
     if (!normalized) {
       throw new ValidationError('Valid email is required');
@@ -1261,6 +1708,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
     if (!passwordHash || !passwordSalt) {
       throw new ValidationError('Password hash and salt are required');
     }
+    normalizeCompetingSlugsInput(competingSlugs);
 
     const now = new Date().toISOString();
     sqlite.exec('BEGIN IMMEDIATE;');
@@ -1273,7 +1721,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         .run(normalized, displayName, String(passwordHash), String(passwordSalt), now);
 
       const userId = Number(res.lastInsertRowid);
-      seedStarterGamesForUser(userId);
+      seedStarterGamesForUser(userId, competingSlugs);
       sqlite.exec('COMMIT;');
 
       return getUserById(userId);
@@ -1550,6 +1998,10 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       out.archived = Boolean(input.archived);
     }
 
+    if (isCreate || input.compete !== undefined) {
+      out.compete = input.compete === undefined ? true : Boolean(input.compete);
+    }
+
     return out;
   }
 
@@ -1642,8 +2094,8 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         INSERT INTO games (
           user_id, name, slug, url, icon, color, category,
           metric_label, metric_format, metric_direction,
-          parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         uid,
@@ -1661,6 +2113,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         fields.resetTime,
         sortOrder,
         sqlBool(fields.archived),
+        sqlBool(fields.compete),
         now,
       );
 
@@ -1698,6 +2151,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       resetTime: fields.resetTime ?? existing.resetTime,
       sortOrder: fields.sortOrder ?? existing.sortOrder,
       archived: fields.archived !== undefined ? fields.archived : existing.archived,
+      compete: fields.compete !== undefined ? fields.compete : existing.compete,
     };
 
     sqlite
@@ -1705,7 +2159,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         UPDATE games SET
           name = ?, slug = ?, url = ?, icon = ?, color = ?, category = ?,
           metric_label = ?, metric_format = ?, metric_direction = ?,
-          parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?
+          parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?, compete = ?
         WHERE id = ? AND user_id = ?
       `)
       .run(
@@ -1723,6 +2177,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         updated.resetTime,
         updated.sortOrder,
         sqlBool(updated.archived),
+        sqlBool(updated.compete),
         existing.id,
         uid,
       );
@@ -1763,7 +2218,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         );
     }
 
-    if (updated.slug !== existing.slug && !STARTER_SLUG_SET.has(existing.slug)) {
+    if (updated.slug !== existing.slug && !BUILTIN_CATALOG_SLUG_SET.has(existing.slug)) {
       const remaining = Number(
         sqlite.prepare('SELECT COUNT(*) AS count FROM games WHERE slug = ?').get(existing.slug).count,
       );
@@ -1830,7 +2285,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
     }
     sqlite.prepare('DELETE FROM games WHERE id = ? AND user_id = ?').run(gameId, uid);
     const slug = String(existingRow.slug);
-    if (!STARTER_SLUG_SET.has(slug)) {
+    if (!BUILTIN_CATALOG_SLUG_SET.has(slug)) {
       const remaining = Number(
         sqlite.prepare('SELECT COUNT(*) AS count FROM games WHERE slug = ?').get(slug).count,
       );
@@ -1852,26 +2307,33 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       .all();
 
     const playerCounts = new Map();
+    const competingCounts = new Map();
     const countRows = sqlite
       .prepare(`
-        SELECT slug, COUNT(DISTINCT user_id) AS player_count
+        SELECT
+          slug,
+          COUNT(DISTINCT user_id) AS player_count,
+          COUNT(DISTINCT CASE WHEN compete != 0 THEN user_id END) AS competing_count
         FROM games
         WHERE user_id IS NOT NULL AND archived = 0
         GROUP BY slug
       `)
       .all();
     for (const cr of countRows) {
-      playerCounts.set(String(cr.slug), Number(cr.player_count));
+      const s = String(cr.slug);
+      playerCounts.set(s, Number(cr.player_count || 0));
+      competingCounts.set(s, Number(cr.competing_count || 0));
     }
 
     const viewerGames = new Map();
     const viewerRows = sqlite
-      .prepare('SELECT id, slug, archived, sort_order FROM games WHERE user_id = ?')
+      .prepare('SELECT id, slug, archived, compete, sort_order FROM games WHERE user_id = ?')
       .all(uid);
     for (const vr of viewerRows) {
       viewerGames.set(String(vr.slug), {
         id: Number(vr.id),
         archived: Boolean(vr.archived),
+        compete: vr.compete === undefined || vr.compete === null ? true : Boolean(vr.compete),
         sortOrder: Number(vr.sort_order),
       });
     }
@@ -1900,18 +2362,23 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         : viewerGame.archived
           ? 'archived'
           : 'active';
+      const createdByUserId =
+        r.created_by_user_id === null || r.created_by_user_id === undefined
+          ? null
+          : Number(r.created_by_user_id);
+      const createdByName = r.created_by_name ? String(r.created_by_name) : null;
+      const meta = enrichGameMetadata(base, { createdByUserId, createdByName });
 
       return {
         ...base,
+        ...meta,
         resolvedParser,
-        isStarter: STARTER_SLUG_SET.has(slug),
-        createdByUserId:
-          r.created_by_user_id === null || r.created_by_user_id === undefined
-            ? null
-            : Number(r.created_by_user_id),
-        createdByName: r.created_by_name ? String(r.created_by_name) : null,
+        createdByUserId,
+        createdByName,
         playerCount: playerCounts.get(slug) || 0,
+        competingCount: competingCounts.get(slug) || 0,
         viewerStatus,
+        viewerCompete: viewerGame ? viewerGame.compete : false,
         viewerGameId: viewerGame ? viewerGame.id : null,
         _viewerSortOrder: viewerGame ? viewerGame.sortOrder : 0,
       };
@@ -1923,7 +2390,11 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
       const rb = statusRank[b.viewerStatus];
       if (ra !== rb) return ra - rb;
       if (a.viewerStatus === 'not_added') {
-        return b.playerCount - a.playerCount || a.name.localeCompare(b.name);
+        return (
+          b.playerCount - a.playerCount ||
+          Number(Boolean(b.createdByUserId)) - Number(Boolean(a.createdByUserId)) ||
+          a.name.localeCompare(b.name)
+        );
       }
       if (a.viewerStatus === 'archived') {
         return a.name.localeCompare(b.name);
@@ -1934,12 +2405,13 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
     return mapped.map(({ _viewerSortOrder, ...item }) => item);
   }
 
-  function subscribeCatalogGame(rawSlug, userId) {
+  function subscribeCatalogGame(rawSlug, userId, { compete = true } = {}) {
     const uid = parsePositiveInt(userId, 'userId');
     const slug = slugify(String(rawSlug || ''));
     if (!slug) {
       throw new ValidationError('Game slug is required');
     }
+    const competeVal = sqlBool(compete !== false);
 
     let catRow = sqlite.prepare('SELECT * FROM game_catalog WHERE slug = ?').get(slug);
     if (!catRow) {
@@ -1987,8 +2459,8 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
 
     if (existing && existing.archived) {
       sqlite
-        .prepare('UPDATE games SET archived = 0, sort_order = ? WHERE id = ? AND user_id = ?')
-        .run(nextOrder, existing.id, uid);
+        .prepare('UPDATE games SET archived = 0, compete = ?, sort_order = ? WHERE id = ? AND user_id = ?')
+        .run(competeVal, nextOrder, existing.id, uid);
       return { game: getGameById(existing.id, uid), status: 'restored' };
     }
 
@@ -1999,8 +2471,8 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         INSERT INTO games (
           user_id, name, slug, url, icon, color, category,
           metric_label, metric_format, metric_direction,
-          parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+          parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `)
       .run(
         uid,
@@ -2017,6 +2489,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         String(c.reset_timezone ?? 'local'),
         String(c.reset_time ?? '00:00'),
         nextOrder,
+        competeVal,
         now,
       );
 
@@ -2618,21 +3091,21 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
         INSERT INTO games (
           id, user_id, name, slug, url, icon, color, category,
           metric_label, metric_format, metric_direction,
-          parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const insertGameStmt = sqlite.prepare(`
         INSERT INTO games (
           user_id, name, slug, url, icon, color, category,
           metric_label, metric_format, metric_direction,
-          parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const updateGameByIdStmt = sqlite.prepare(`
         UPDATE games SET
           name = ?, url = ?, icon = ?, color = ?, category = ?,
           metric_label = ?, metric_format = ?, metric_direction = ?,
-          parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?
+          parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?, compete = ?
         WHERE id = ? AND user_id = ?
       `);
 
@@ -2668,6 +3141,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
             fields.resetTime,
             sortOrder,
             sqlBool(fields.archived),
+            sqlBool(fields.compete),
             mappedId,
             uid,
           );
@@ -2697,6 +3171,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
               fields.resetTime,
               sortOrder,
               sqlBool(fields.archived),
+              sqlBool(fields.compete),
               createdAt,
             );
             mappedId = Number(rawGame.id);
@@ -2717,6 +3192,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
               fields.resetTime,
               sortOrder,
               sqlBool(fields.archived),
+              sqlBool(fields.compete),
               createdAt,
             );
             mappedId = Number(res.lastInsertRowid);
@@ -2833,6 +3309,7 @@ export function createDatabase({ dbPath = DEFAULT_DB_PATH } = {}) {
   return {
     sqlite,
     registerUser,
+    listPublicSignupCatalog,
     getUserByEmail,
     getUserById,
     getAuthBootstrapStatus,

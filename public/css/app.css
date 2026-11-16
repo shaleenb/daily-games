@@ -396,6 +396,11 @@
     display: flex;
     flex-direction: column;
     justify-content: center;
+    transition: max-width var(--transition-base);
+  }
+
+  .auth-screen.is-signup-mode {
+    max-width: 680px;
   }
 
   .auth-card {
@@ -403,6 +408,169 @@
     flex-direction: column;
     gap: 1.05rem;
     padding: 1.35rem 1.4rem;
+  }
+
+  .signup-games-fieldset {
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+    padding: 0.85rem 0.9rem;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+
+  .signup-games-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .signup-games-header legend {
+    padding: 0;
+    margin: 0;
+  }
+
+  .signup-games-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.36rem;
+    flex-wrap: wrap;
+  }
+
+  .signup-games-hint {
+    margin: 0;
+    font-size: 0.78rem;
+  }
+
+  .signup-games-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem;
+  }
+
+  .signup-game-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.48rem;
+    min-block-size: 44px;
+    padding: 0.4rem 0.56rem;
+    border-radius: var(--radius-sm);
+    border: 1.5px solid var(--border);
+    background: var(--surface);
+    cursor: pointer;
+    min-width: 0;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .signup-game-chip:hover {
+    border-color: var(--ink-outline);
+  }
+
+  .signup-game-chip:has(input:checked) {
+    border-color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 10%, var(--surface));
+  }
+
+  .signup-game-chip input[type="checkbox"] {
+    width: 17px;
+    height: 17px;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .signup-game-chip-icon {
+    font-size: 1.05rem;
+    flex-shrink: 0;
+  }
+
+  .signup-game-chip-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+    gap: 0.08rem;
+  }
+
+  .signup-game-chip-name {
+    font-family: var(--font-display);
+    font-size: 0.82rem;
+    font-weight: 800;
+    color: var(--text-strong);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .signup-game-chip-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.28rem;
+    flex-wrap: wrap;
+    font-size: 0.7rem;
+    color: var(--muted);
+  }
+
+  .signup-optional-collections {
+    border-top: 1.5px dashed var(--border);
+    padding-top: 0.55rem;
+  }
+
+  .signup-optional-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    list-style: none;
+    cursor: pointer;
+    min-block-size: 38px;
+    font-family: var(--font-display);
+    font-size: 0.8rem;
+    font-weight: 800;
+    color: var(--text-strong);
+  }
+
+  .signup-optional-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .signup-optional-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.72rem;
+    margin-top: 0.6rem;
+    max-height: 280px;
+    overflow-y: auto;
+    padding-right: 0.15rem;
+  }
+
+  .signup-collection-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.42rem;
+  }
+
+  .signup-collection-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .signup-collection-title {
+    font-family: var(--font-display);
+    font-size: 0.76rem;
+    font-weight: 800;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
   .auth-card-head {
@@ -2664,6 +2832,169 @@
     flex-wrap: wrap;
   }
 
+  .today-tag-filter-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.38rem;
+  }
+
+  .leaderboard-scope-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.45rem 0.65rem;
+  }
+
+  .lb-competing-scope-chip {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.32rem;
+  }
+
+  .cell-accuracy-line {
+    font-size: 0.72rem;
+    line-height: 1.25;
+    margin-top: 0.14rem;
+    white-space: nowrap;
+  }
+
+  .roster-compete-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.68rem;
+    padding: 0.5rem 0.72rem;
+    border-radius: var(--radius-sm);
+    border: 1.5px solid var(--border);
+    background: var(--surface-2);
+  }
+
+  .roster-compete-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.34rem;
+    flex-wrap: wrap;
+  }
+
+  .compete-toggle-btn {
+    border: 1.5px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    font-weight: 800;
+  }
+
+  .compete-toggle-btn:hover:not(:disabled) {
+    border-color: var(--ink-outline);
+    color: var(--text-strong);
+  }
+
+  .compete-toggle-btn.is-competing {
+    background: color-mix(in oklab, var(--success) 15%, var(--surface));
+    color: color-mix(in oklab, var(--success) 82%, var(--text-strong));
+    border-color: color-mix(in oklab, var(--success) 48%, transparent);
+  }
+
+  .catalog-search-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.48rem;
+  }
+
+  .catalog-tag-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.34rem;
+  }
+
+  .tag-filter-pill {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-block-size: 30px;
+    padding: 0.22rem 0.62rem;
+    border-radius: var(--radius-pill);
+    border: 1.5px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: 0.75rem;
+    font-weight: 800;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  }
+
+  .tag-filter-pill:hover {
+    border-color: var(--ink-outline);
+    color: var(--text-strong);
+  }
+
+  .tag-filter-pill.is-active {
+    background: var(--accent);
+    border-color: var(--ink-outline);
+    color: var(--accent-ink);
+    box-shadow: 0 2px 0 var(--accent-lip);
+  }
+
+  .catalog-collections-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.58rem;
+  }
+
+  .catalog-collection-group {
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    padding: 0.45rem 0.65rem;
+  }
+
+  .catalog-collection-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    list-style: none;
+    cursor: pointer;
+    min-block-size: 34px;
+    font-family: var(--font-display);
+    font-size: 0.82rem;
+    font-weight: 800;
+    color: var(--text-strong);
+  }
+
+  .catalog-collection-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .catalog-collection-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.36rem;
+    flex-shrink: 0;
+  }
+
+  .catalog-collection-chevron {
+    color: var(--muted);
+    font-size: 0.85em;
+    transition: transform var(--transition-fast);
+  }
+
+  .catalog-collection-group[open] .catalog-collection-chevron {
+    transform: rotate(180deg);
+    color: var(--accent);
+  }
+
+  .catalog-collection-group .catalog-list {
+    margin-top: 0.5rem;
+  }
+
   .game-dialog-body {
     display: flex;
     flex-direction: column;
@@ -2694,8 +3025,9 @@
     gap: 0.48rem;
   }
 
-  .catalog-picker-section .catalog-list {
-    max-height: 220px;
+  .catalog-picker-section .catalog-collections-stack,
+  .catalog-picker-section .catalog-owned-details .catalog-list {
+    max-height: 280px;
     overflow-y: auto;
     padding-right: 0.15rem;
   }
@@ -3404,12 +3736,22 @@
       padding: 0.9rem 0.85rem 3rem;
     }
 
-    .auth-screen {
+    .auth-screen,
+    .auth-screen.is-signup-mode {
+      max-width: 100%;
       padding: 1rem 0.85rem 3rem;
     }
 
     .auth-card {
       padding: 1.1rem 1rem;
+    }
+
+    .signup-games-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .signup-games-fieldset {
+      padding: 0.72rem 0.75rem;
     }
 
     .user-chip-name {
@@ -3468,7 +3810,8 @@
     .btn-sm,
     .btn-xs,
     .game-pill-btn,
-    .difficulty-pill {
+    .difficulty-pill,
+    .tag-filter-pill {
       min-block-size: 38px;
     }
   }

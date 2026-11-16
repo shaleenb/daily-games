@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import worker from '../worker/index.js';
 import { ensureSchema, canonicalUrlKey, createD1Database } from '../worker/db-d1.js';
+import { BUILTIN_CATALOG_GAMES, OPTIONAL_CATALOG_GAMES } from '../shared/auth-crypto.js';
+import { getGamePuzzleStatus } from '../shared/parsers/registry.js';
 import { DIFFICULTY_COLORS } from '../server/stats.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -240,12 +242,15 @@ test('Worker auth lifecycle: register, __Host-dg_session vs dg_session, login, l
   // Unauthenticated endpoints
   const meAnon = await httpsClient.call('/api/auth/me');
   assert.equal(meAnon.status, 200);
-  assert.deepEqual(meAnon.json, {
-    authenticated: false,
-    user: null,
-    hasUsers: false,
-    unclaimed: { gamesCount: 0, entriesCount: 0 },
-  });
+  assert.equal(meAnon.json.authenticated, false);
+  assert.equal(meAnon.json.user, null);
+  assert.equal(meAnon.json.hasUsers, false);
+  assert.deepEqual(meAnon.json.unclaimed, { gamesCount: 0, entriesCount: 0 });
+  assert.equal(Array.isArray(meAnon.json.signupCatalog), true);
+  assert.equal(meAnon.json.signupCatalog.length, BUILTIN_CATALOG_GAMES.length);
+  const signupSizeItUp = meAnon.json.signupCatalog.find((g) => g.slug === 'magnitudle');
+  assert.equal(signupSizeItUp?.name, 'Size It Up');
+  assert.equal(signupSizeItUp?.collection, 'Magnitudle');
 
   const unauthBootstrap = await httpsClient.call('/api/bootstrap');
   assert.equal(unauthBootstrap.status, 401);
@@ -300,12 +305,13 @@ test('Worker auth lifecycle: register, __Host-dg_session vs dg_session, login, l
 
   // Post-logout session is invalidated
   const meAfterLogout = await httpsClient.call('/api/auth/me');
-  assert.deepEqual(meAfterLogout.json, {
-    authenticated: false,
-    user: null,
-    hasUsers: true,
-    unclaimed: { gamesCount: 0, entriesCount: 0 },
-  });
+  assert.equal(meAfterLogout.status, 200);
+  assert.equal(meAfterLogout.json.authenticated, false);
+  assert.equal(meAfterLogout.json.user, null);
+  assert.equal(meAfterLogout.json.hasUsers, true);
+  assert.deepEqual(meAfterLogout.json.unclaimed, { gamesCount: 0, entriesCount: 0 });
+  assert.equal(Array.isArray(meAfterLogout.json.signupCatalog), true);
+  assert.equal(meAfterLogout.json.signupCatalog.length, BUILTIN_CATALOG_GAMES.length);
 
   // Wrong password -> 401; nonexistent user -> 401
   const badPw = await httpsClient.call('/api/auth/login', {
@@ -367,7 +373,11 @@ test('Worker strict Alice vs Bob isolation, games CRUD/reorder, entries upsert, 
   assert.equal(aliceCluesStarter.parserId, 'cluesbysam');
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'perceptle' && g.parserId === 'perceptle'));
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'fermi' && g.parserId === 'fermi'));
-  assert.ok(aliceBoot.json.games.some((g) => g.slug === 'magnitudle' && g.parserId === 'magnitudle'));
+  assert.ok(
+    aliceBoot.json.games.some(
+      (g) => g.slug === 'magnitudle' && g.name === 'Size It Up' && g.parserId === 'magnitudle',
+    ),
+  );
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'eraly' && g.parserId === 'eraly'));
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'plain' && g.parserId === 'plain'));
   assert.ok(aliceBoot.json.games.some((g) => g.slug === 'timeguessr' && g.parserId === 'timeguessr'));
@@ -626,12 +636,12 @@ test('Worker ensureSchema is idempotent and first user claims pre-existing user_
   const first = harness.createSessionClient();
   const meBeforeClaim = await first.call('/api/auth/me');
   assert.equal(meBeforeClaim.status, 200);
-  assert.deepEqual(meBeforeClaim.json, {
-    authenticated: false,
-    user: null,
-    hasUsers: false,
-    unclaimed: { gamesCount: 1, entriesCount: 1 },
-  });
+  assert.equal(meBeforeClaim.json.authenticated, false);
+  assert.equal(meBeforeClaim.json.user, null);
+  assert.equal(meBeforeClaim.json.hasUsers, false);
+  assert.deepEqual(meBeforeClaim.json.unclaimed, { gamesCount: 1, entriesCount: 1 });
+  assert.equal(Array.isArray(meBeforeClaim.json.signupCatalog), true);
+  assert.ok(meBeforeClaim.json.signupCatalog.length >= BUILTIN_CATALOG_GAMES.length);
 
   const regFirst = await first.call('/api/auth/register', {
     method: 'POST',
@@ -804,10 +814,12 @@ test('Worker GET /api/leaderboard: multi-player Olympic 1224 ties, privacy, and 
       },
     })
   ).json.game;
+  const wordleActiveDate = getGamePuzzleStatus(bobWordle, new Date(), tz).activePuzzleDate;
   await bob.call('/api/entries', {
     method: 'POST',
     body: {
       gameId: bobWordle.id,
+      playDate: wordleActiveDate,
       rawText: 'Wordle 1,250 X/6\n\n⬛🟨⬛⬛⬛\n⬛⬛⬛⬛⬛',
     },
   });
@@ -943,10 +955,11 @@ test('Worker Shared Hub Game Catalog: upgrade from 0001_init, subscribe/restore,
 
   const bobLbBefore = await bob.call('/api/leaderboard?live=1&tz=UTC&gameSlug=nyt-connections');
   assert.equal(bobLbBefore.status, 200);
-  const lbConnBefore = bobLbBefore.json.catalogGames.find((g) => g.slug === 'nyt-connections');
-  assert.equal(lbConnBefore.viewerHasGame, false);
-  assert.equal(lbConnBefore.viewerArchivedGame, false);
-  assert.equal(lbConnBefore.playerCount, 1);
+  assert.equal(
+    bobLbBefore.json.catalogGames.some((g) => g.slug === 'nyt-connections'),
+    false,
+  );
+  assert.notEqual(bobLbBefore.json.gameBoard.game.slug, 'nyt-connections');
 
   // Unknown catalog slug -> 404
   assert.equal(
@@ -963,6 +976,14 @@ test('Worker Shared Hub Game Catalog: upgrade from 0001_init, subscribe/restore,
   assert.equal(sub1.status, 201);
   assert.equal(sub1.json.status, 'subscribed');
   assert.equal(sub1.json.game.slug, 'nyt-connections');
+  assert.equal(sub1.json.game.compete, true);
+
+  const bobLbAfterSub = await bob.call('/api/leaderboard?live=1&tz=UTC&gameSlug=nyt-connections');
+  assert.equal(bobLbAfterSub.status, 200);
+  assert.equal(bobLbAfterSub.json.gameBoard.game.slug, 'nyt-connections');
+  assert.equal(bobLbAfterSub.json.gameBoard.game.viewerHasGame, true);
+  assert.equal(bobLbAfterSub.json.gameBoard.game.viewerArchivedGame, false);
+  assert.equal(bobLbAfterSub.json.gameBoard.game.playerCount, 2);
 
   const sub2 = await bob.call('/api/catalog/subscribe', {
     method: 'POST',
@@ -977,8 +998,15 @@ test('Worker Shared Hub Game Catalog: upgrade from 0001_init, subscribe/restore,
     body: { archived: true },
   });
   const lbArchived = await bob.call('/api/leaderboard?live=1&tz=UTC&gameSlug=nyt-connections');
-  assert.equal(lbArchived.json.gameBoard.game.viewerHasGame, false);
-  assert.equal(lbArchived.json.gameBoard.game.viewerArchivedGame, true);
+  assert.equal(
+    lbArchived.json.catalogGames.some((g) => g.slug === 'nyt-connections'),
+    false,
+  );
+  const bobBootArchived = await bob.call('/api/bootstrap?live=1&tz=UTC');
+  assert.equal(
+    bobBootArchived.json.catalog.find((c) => c.slug === 'nyt-connections')?.viewerStatus,
+    'archived',
+  );
 
   const subRestore = await bob.call('/api/catalog/subscribe', {
     method: 'POST',
@@ -1272,7 +1300,7 @@ test('Worker difficulty parse-preview, manual override/clear, /api/stats?difficu
     body: {
       gameId: bobClues.id,
       playDate: '2026-11-12',
-      rawText: 'I solved Clues by Sam (Easy) in 00:45',
+      rawText: 'I solved Clues by Sam (Easy) in 00:45\n🟩🟩🟩🟩',
     },
   });
   await bob.call('/api/entries', {
@@ -1280,7 +1308,7 @@ test('Worker difficulty parse-preview, manual override/clear, /api/stats?difficu
     body: {
       gameId: bobClues.id,
       playDate: '2026-11-15',
-      rawText: 'I solved Clues by Sam (Hard) in 03:30',
+      rawText: 'I solved Clues by Sam (Hard) in 03:30\n🟩🟩🟩🟩',
     },
   });
 
@@ -2131,7 +2159,7 @@ test('Worker D1 verifiedSchemaDbs WeakSet + 1-query cold fast-path + single-roun
   coldD1.resetCounts();
   const bootData = await dbWarm.getBootstrapDataset(user.id);
   assert.equal(bootData.games.length, 10);
-  assert.equal(bootData.catalog.length, 10);
+  assert.equal(bootData.catalog.length, BUILTIN_CATALOG_GAMES.length);
   assert.equal(coldD1.counts.batchCalls, 1);
 
   coldD1.resetCounts();
@@ -2240,6 +2268,408 @@ test('Worker GET /api/bootstrap entries parity and GET /api/leaderboard gameBoar
     );
     assert.deepEqual(cluesBundle.byDifficulty[diff], individualDiff.json.gameBoard);
   }
+
+  harness.sqliteDb.close();
+});
+
+test('Worker signupCatalog, selective competingSlugs (fresh + unclaimed claim), compete toggle, and optional catalog orphan protection', async () => {
+  const harness = createWorkerHarness({ applyMigration: true });
+  const anon = harness.createSessionClient();
+  const alice = harness.createSessionClient();
+  const bob = harness.createSessionClient();
+
+  const me = await anon.call('/api/auth/me');
+  assert.equal(me.status, 200);
+  assert.equal(me.json.signupCatalog.length, BUILTIN_CATALOG_GAMES.length);
+  assert.equal(me.json.signupCatalog.find((g) => g.slug === 'magnitudle')?.name, 'Size It Up');
+  assert.equal(me.json.signupCatalog.find((g) => g.slug === 'weigh-it-up')?.isOptional, true);
+  assert.equal(me.json.signupCatalog.find((g) => g.slug === 'skyq')?.collection, 'FlightQ');
+
+  // Invalid competingSlugs -> 400 with zero orphan user created
+  for (const badSlugs of ['cluesbysam', [123], [], ['does-not-exist']]) {
+    const badReg = await alice.call('/api/auth/register', {
+      method: 'POST',
+      body: {
+        name: 'Bad',
+        email: 'bad-slugs@example.com',
+        password: 'password123',
+        competingSlugs: badSlugs,
+      },
+    });
+    assert.equal(badReg.status, 400);
+  }
+  assert.equal(Number(harness.sqliteDb.prepare('SELECT COUNT(*) AS c FROM users').get().c), 0);
+
+  // Alice registers with selective competingSlugs (1 starter + 1 optional)
+  const regAlice = await alice.call('/api/auth/register', {
+    method: 'POST',
+    body: {
+      name: 'Alice',
+      email: 'alice-sel-d1@example.com',
+      password: 'password123',
+      competingSlugs: ['cluesbysam', 'weigh-it-up'],
+    },
+  });
+  assert.equal(regAlice.status, 201);
+  const aliceGames = (await alice.call('/api/games')).json.games;
+  assert.deepEqual(
+    aliceGames.map((g) => g.slug),
+    ['cluesbysam', 'weigh-it-up'],
+  );
+  assert.equal(aliceGames.every((g) => g.compete === true), true);
+
+  const aliceCat = await alice.call('/api/catalog');
+  assert.equal(aliceCat.status, 200);
+  const weighCat = aliceCat.json.catalog.find((c) => c.slug === 'weigh-it-up');
+  assert.equal(weighCat.viewerStatus, 'active');
+  assert.equal(weighCat.viewerCompete, true);
+  assert.equal(weighCat.competingCount, 1);
+
+  // Bob registers normally, subscribes to SkyQ with compete: false (validated boolean)
+  await bob.call('/api/auth/register', {
+    method: 'POST',
+    body: { name: 'Bob', email: 'bob-sel-d1@example.com', password: 'password123' },
+  });
+  const badSub = await bob.call('/api/catalog/subscribe', {
+    method: 'POST',
+    body: { slug: 'skyq', compete: 'nope' },
+  });
+  assert.equal(badSub.status, 400);
+
+  const bobSub = await bob.call('/api/catalog/subscribe', {
+    method: 'POST',
+    body: { slug: 'skyq', compete: false },
+  });
+  assert.equal(bobSub.status, 201);
+  assert.equal(bobSub.json.game.slug, 'skyq');
+  assert.equal(bobSub.json.game.compete, false);
+
+  await bob.call('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: bobSub.json.game.id,
+      playDate: '2026-11-16',
+      rawText: 'SkyQ #10\n✈️🟩🟩 3/6',
+    },
+  });
+
+  const bobBoot = await bob.call('/api/bootstrap?date=2026-11-16');
+  assert.equal(bobBoot.status, 200);
+  assert.equal(bobBoot.json.games.some((g) => g.slug === 'skyq' && g.compete === false), true);
+  assert.equal(bobBoot.json.entries.some((e) => e.gameId === bobSub.json.game.id), true);
+
+  const bobCat = await bob.call('/api/catalog');
+  const skyCat = bobCat.json.catalog.find((c) => c.slug === 'skyq');
+  assert.equal(skyCat.viewerStatus, 'active');
+  assert.equal(skyCat.viewerCompete, false);
+  assert.equal(skyCat.playerCount, 1);
+  assert.equal(skyCat.competingCount, 0);
+
+  const bobLb = await bob.call('/api/leaderboard?date=2026-11-16&days=30&gameSlug=skyq');
+  assert.equal(bobLb.status, 200);
+  assert.equal(bobLb.json.catalogGames.some((g) => g.slug === 'skyq'), false);
+  assert.equal(
+    bobLb.json.overallStandings.find((p) => p.displayName === 'Bob').arcadePoints,
+    0,
+  );
+
+  // Alice toggles weigh-it-up to compete: false -> excluded from leaderboard; delete keeps optional catalog entry
+  const aliceWeigh = aliceGames.find((g) => g.slug === 'weigh-it-up');
+  const toggled = await alice.call(`/api/games/${aliceWeigh.id}`, {
+    method: 'PUT',
+    body: { compete: false },
+  });
+  assert.equal(toggled.status, 200);
+  assert.equal(toggled.json.game.compete, false);
+
+  const aliceLb = await alice.call('/api/leaderboard?date=2026-11-16&days=30');
+  assert.equal(aliceLb.json.catalogGames.some((g) => g.slug === 'weigh-it-up'), false);
+
+  assert.equal((await alice.call(`/api/games/${aliceWeigh.id}`, { method: 'DELETE' })).status, 200);
+  assert.ok(
+    harness.sqliteDb.prepare("SELECT 1 FROM game_catalog WHERE slug = 'weigh-it-up'").get(),
+    'Built-in optional catalog game should survive last-user deletion',
+  );
+  harness.sqliteDb.close();
+
+  // Claiming unclaimed legacy data with competingSlugs flips unselected unclaimed games to compete=0 & inserts selected optional games
+  const claimHarness = createWorkerHarness({ applyMigration: true });
+  await ensureSchema(claimHarness.d1);
+  const now = new Date().toISOString();
+  claimHarness.sqliteDb
+    .prepare(
+      `INSERT INTO games (user_id, name, slug, url, icon, color, category, metric_label, metric_format, metric_direction, parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at)
+       VALUES (NULL, 'Krillion', 'krillion', 'https://krillion.io', '🦑', '#06b6d4', 'Trivia', 'Score', 'number', 'higher_is_better', 'auto', 'America/New_York', '00:00', 1, 0, 1, ?)`,
+    )
+    .run(now);
+  const charlie = claimHarness.createSessionClient();
+  const regCharlie = await charlie.call('/api/auth/register', {
+    method: 'POST',
+    body: {
+      name: 'Charlie',
+      email: 'charlie-claim-d1@example.com',
+      password: 'password123',
+      competingSlugs: ['cluesbysam', 'skyq'],
+    },
+  });
+  assert.equal(regCharlie.status, 201);
+  const charlieGames = (await charlie.call('/api/games')).json.games;
+  assert.equal(charlieGames.find((g) => g.slug === 'krillion')?.compete, false);
+  assert.equal(charlieGames.find((g) => g.slug === 'cluesbysam')?.compete, true);
+  assert.equal(charlieGames.find((g) => g.slug === 'skyq')?.compete, true);
+  claimHarness.sqliteDb.close();
+});
+
+test('Worker Clues by Sam accuracy-first weighted Leaderboard ranking, spoiler shield, and export/import compete round-trip', async () => {
+  const harness = createWorkerHarness({ applyMigration: true });
+  const alice = harness.createSessionClient();
+  const bob = harness.createSessionClient();
+  const charlie = harness.createSessionClient();
+  const dana = harness.createSessionClient();
+  const eve = harness.createSessionClient();
+
+  for (const [client, name, email] of [
+    [alice, 'Alice', 'alice-acc-d1@example.com'],
+    [bob, 'Bob', 'bob-acc-d1@example.com'],
+    [charlie, 'Charlie', 'charlie-acc-d1@example.com'],
+    [dana, 'Dana', 'dana-acc-d1@example.com'],
+    [eve, 'Eve', 'eve-acc-d1@example.com'],
+  ]) {
+    await client.call('/api/auth/register', {
+      method: 'POST',
+      body: { name, email, password: 'password123', competingSlugs: ['cluesbysam'] },
+    });
+  }
+
+  const getCluesId = async (c) => (await c.call('/api/games')).json.games[0].id;
+  const playDate = '2026-11-16';
+
+  // Alice: slower (03:00) but PERFECT grid (penalty 0) -> Rank 1
+  const aEntry = await alice.call('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: await getCluesId(alice),
+      playDate,
+      rawText: 'I solved the daily #CluesBySam, Nov 16th 2026 (Hard), in 03:00\n🟩🟩🟩🟩\n🟩🟩🟩🟩',
+    },
+  });
+  assert.equal(aEntry.json.entry.metadata.isPerfect, true);
+  assert.equal(aEntry.json.entry.metadata.accuracyPenalty, 0);
+
+  // Bob: faster (01:30) with 1 mistake 🟨 (penalty 1) -> Rank 2
+  const bEntry = await bob.call('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: await getCluesId(bob),
+      playDate,
+      rawText: 'I solved the daily #CluesBySam, Nov 16th 2026 (Hard), in 01:30\n🟩🟩🟩🟨\n🟩🟩🟩🟩',
+    },
+  });
+  assert.equal(bEntry.json.entry.metadata.yellowCount, 1);
+  assert.equal(bEntry.json.entry.metadata.accuracyPenalty, 1);
+
+  // Charlie: faster still (01:00) with 1 single hint 🟡 (weight 1, penalty 2) -> Rank 3
+  const cEntry = await charlie.call('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: await getCluesId(charlie),
+      playDate,
+      rawText: 'I solved the daily #CluesBySam, Nov 16th 2026 (Hard), in 01:00\n🟩🟩🟩🟡\n🟩🟩🟩🟩',
+    },
+  });
+  assert.equal(cEntry.json.entry.metadata.singleHintCount, 1);
+  assert.equal(cEntry.json.entry.metadata.totalHintWeight, 1);
+  assert.equal(cEntry.json.entry.metadata.accuracyPenalty, 2);
+
+  // Dana: fastest (00:45) with 1 double hint 🟠 (weight 2, penalty 3) -> Rank 4
+  const dEntry = await dana.call('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: await getCluesId(dana),
+      playDate,
+      rawText: 'I solved the daily #CluesBySam, Nov 16th 2026 (Hard), in 00:45\n🟩🟩🟩🟠\n🟩🟩🟩🟩',
+    },
+  });
+  assert.equal(dEntry.json.entry.metadata.doubleHintCount, 1);
+  assert.equal(dEntry.json.entry.metadata.totalHintWeight, 2);
+  assert.equal(dEntry.json.entry.metadata.accuracyPenalty, 3);
+
+  // Unplayed viewer (Eve) sees spoiler-redacted Clues grid & accuracy on active puzzle
+  const eveLb = await eve.call(`/api/leaderboard?date=${playDate}&days=30&gameSlug=cluesbysam`);
+  assert.equal(eveLb.status, 200);
+  const eveAliceCell = eveLb.json.todayMatrix.rows.find((r) => r.displayName === 'Alice').cells
+    .cluesbysam;
+  assert.equal(eveAliceCell.spoilerProtected, true);
+  assert.equal(eveAliceCell.emojiGrid, null);
+  assert.equal(eveAliceCell.accuracySummary, null);
+
+  // Alice checks leaderboard -> exact weighted accuracy order: Alice > Bob > Charlie > Dana
+  const lb = await alice.call(`/api/leaderboard?date=${playDate}&days=30&gameSlug=cluesbysam`);
+  assert.equal(lb.status, 200);
+  const standings = lb.json.gameBoard.standings;
+  assert.equal(standings[0].displayName, 'Alice');
+  assert.equal(standings[0].today.rank, 1);
+  assert.equal(standings[0].today.medal, 'gold');
+  assert.equal(standings[0].today.accuracyPenalty, 0);
+  assert.equal(standings[0].today.accuracySummary, '8/8 🟩');
+  assert.equal(standings[1].displayName, 'Bob');
+  assert.equal(standings[1].today.rank, 2);
+  assert.equal(standings[1].today.medal, 'silver');
+  assert.equal(standings[1].today.accuracyPenalty, 1);
+  assert.equal(standings[2].displayName, 'Charlie');
+  assert.equal(standings[2].today.rank, 3);
+  assert.equal(standings[2].today.medal, 'bronze');
+  assert.equal(standings[2].today.accuracyPenalty, 2);
+  assert.equal(standings[3].displayName, 'Dana');
+  assert.equal(standings[3].today.rank, 4);
+  assert.equal(standings[3].today.medal, null);
+  assert.equal(standings[3].today.accuracyPenalty, 3);
+
+  // Export/Import preserves compete: false across replace mode
+  const cluesId = await getCluesId(alice);
+  await alice.call(`/api/games/${cluesId}`, { method: 'PUT', body: { compete: false } });
+  const exported = await alice.call('/api/export');
+  assert.equal(exported.status, 200);
+  assert.equal(exported.json.games[0].compete, false);
+  const imported = await alice.call('/api/import', {
+    method: 'POST',
+    body: { mode: 'replace', games: exported.json.games, entries: exported.json.entries },
+  });
+  assert.equal(imported.status, 200);
+  const gamesAfterImport = (await alice.call('/api/games')).json.games;
+  assert.equal(gamesAfterImport[0].compete, false);
+
+  harness.sqliteDb.close();
+});
+
+test('Worker clues_accuracy_sizeitup_and_collections_v1 legacy D1 migration: adds compete, renames Size It Up safely, seeds optional catalog, and backfills Clues accuracy', async () => {
+  const harness = createWorkerHarness({ applyMigration: true });
+  const now = '2026-11-16T00:00:00.000Z';
+
+  const catalogSql = fs.readFileSync(
+    path.join(PROJECT_ROOT, 'migrations', '0002_game_catalog.sql'),
+    'utf8',
+  );
+  harness.sqliteDb.exec(catalogSql);
+
+  const { sha256Hex } = await import('../shared/auth-crypto.js');
+  const rawToken = 'wave2a-mig-session-token';
+  const tokenHash = await sha256Hex(rawToken);
+
+  // Verify 0001_init legacy games table lacks `compete` before ensureSchema
+  const colsBefore = harness.sqliteDb
+    .prepare('PRAGMA table_info(games)')
+    .all()
+    .map((c) => c.name);
+  assert.equal(colsBefore.includes('compete'), false);
+
+  harness.sqliteDb.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+    INSERT INTO schema_migrations (id, applied_at) VALUES
+      ('wave2_starters_and_cluesbysam_v1', '2026-11-16T00:00:00.000Z'),
+      ('cluesbysam_difficulty_backfill_v1', '2026-11-16T00:00:00.000Z'),
+      ('perceptle_parser_and_backfill_v1', '2026-11-16T00:00:00.000Z'),
+      ('fermi_magnitudle_grids_backfill_v1', '2026-11-16T00:00:00.000Z'),
+      ('eraly_starter_v1', '2026-11-16T00:00:00.000Z');
+    INSERT INTO users (id, email, display_name, password_hash, password_salt, created_at)
+    VALUES
+      (1, 'p1-w2a@example.com', 'Player 1', 'h', 's', '2026-11-01T00:00:00Z'),
+      (2, 'p2-w2a@example.com', 'Player 2', 'h', 's', '2026-11-01T00:00:00Z');
+    INSERT INTO games (id, user_id, name, slug, url, category, metric_label, metric_format, metric_direction, parser_id, sort_order, archived, created_at)
+    VALUES
+      (1, 1, 'Clues by Sam', 'cluesbysam', 'https://cluesbysam.com', 'Logic', 'Solve Time', 'duration_sec', 'lower_is_better', 'cluesbysam', 1, 0, '2026-11-01T00:00:00Z'),
+      (2, 1, 'Magnitudle', 'magnitudle', 'https://magnitudle.com', 'Trivia', 'Score', 'number', 'higher_is_better', 'magnitudle', 7, 0, '2026-11-01T00:00:00Z'),
+      (3, 2, 'My Custom Mag', 'magnitudle', 'https://magnitudle.com', 'Trivia', 'Score', 'number', 'higher_is_better', 'magnitudle', 7, 0, '2026-11-01T00:00:00Z');
+    INSERT INTO game_catalog (slug, name, url, category, parser_id, created_at, updated_at)
+    VALUES ('magnitudle', 'Magnitudle', 'https://magnitudle.com', 'Trivia', 'magnitudle', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z');
+    INSERT INTO entries (
+      id, user_id, game_id, play_date, raw_text, parser_id, parser_version,
+      completed, solved, primary_value, display_value, puzzle_id,
+      breakdown_json, metadata_json, manual_override, created_at, updated_at
+    ) VALUES
+      (1, 1, 1, '2026-11-16', 'I solved the daily #CluesBySam, Nov 16th 2026 (Hard), in 02:15\n🟩🟩🟨🟡\n🟩🟩🟩🟠', 'cluesbysam', 2, 1, 1, 135, '2:15', '2026-11-16', '[]', '{"difficulty":"Hard","seconds":135}', 0, '2026-11-16T00:00:00Z', '2026-11-16T00:00:00Z'),
+      (2, 1, 1, '2026-11-15', 'I solved the daily Clues by Sam, Nov 15th 2026 (Easy), in 01:40\n🟩🟩🟩🟩', 'cluesbysam', 2, 1, 1, 100, '1:40', '2026-11-15', '[]', '{"difficulty":"Brutal","difficultyOverride":true}', 0, '2026-11-15T00:00:00Z', '2026-11-15T00:00:00Z'),
+      (3, 1, 1, '2026-11-14', 'I solved the daily Clues by Sam, Nov 14th 2026 (Easy), in 01:40\n🟩🟩🟨🟡', 'cluesbysam', 2, 1, 1, 99, '1:39', 'manual-id', '[]', '{}', 1, '2026-11-14T00:00:00Z', '2026-11-14T00:00:00Z');
+  `);
+  harness.sqliteDb
+    .prepare(
+      'INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)',
+    )
+    .run('sess-w2a', 1, tokenHash, '2099-01-01T00:00:00.000Z', now);
+
+  await ensureSchema(harness.d1);
+  // Idempotent second pass + fresh createD1Database cold/warm fast-path
+  await ensureSchema(harness.d1);
+  let coldPrepares = 0;
+  const freshBase = createD1Adapter(harness.sqliteDb);
+  const coldWrapper = {
+    prepare(sql) {
+      coldPrepares += 1;
+      return freshBase.prepare(sql);
+    },
+    batch: (stmts) => freshBase.batch(stmts),
+    exec: (sql) => freshBase.exec(sql),
+  };
+  const dbCold = createD1Database(coldWrapper);
+  await dbCold.listUsersPublic();
+  assert.equal(coldPrepares, 2);
+  coldPrepares = 0;
+  const dbWarm = createD1Database(coldWrapper);
+  await dbWarm.listUsersPublic();
+  assert.equal(coldPrepares, 1);
+
+  const client = harness.createSessionClient();
+  const authHeader = { Cookie: `__Host-dg_session=${rawToken}` };
+  const gamesRes = await client.call('/api/games', { headers: authHeader });
+  assert.equal(gamesRes.status, 200);
+  const magP1 = gamesRes.json.games.find((g) => g.slug === 'magnitudle');
+  assert.equal(magP1.name, 'Size It Up');
+  assert.equal(magP1.url, 'https://magnitudle.com/size-it-up');
+  assert.equal(magP1.category, 'Estimation');
+  assert.equal(magP1.compete, true);
+
+  const magP2 = harness.sqliteDb.prepare('SELECT name FROM games WHERE id = 3').get();
+  assert.equal(magP2.name, 'My Custom Mag');
+
+  const catalogRes = await client.call('/api/catalog', { headers: authHeader });
+  assert.equal(catalogRes.json.catalog.find((c) => c.slug === 'magnitudle')?.name, 'Size It Up');
+  for (const opt of OPTIONAL_CATALOG_GAMES) {
+    assert.ok(
+      catalogRes.json.catalog.some((c) => c.slug === opt.slug),
+      `Missing optional catalog game ${opt.slug}`,
+    );
+  }
+
+  const entriesRes = await client.call('/api/entries?gameId=1', { headers: authHeader });
+  const e1 = entriesRes.json.entries.find((e) => e.playDate === '2026-11-16');
+  const e2 = entriesRes.json.entries.find((e) => e.playDate === '2026-11-15');
+  const e3 = entriesRes.json.entries.find((e) => e.playDate === '2026-11-14');
+
+  assert.equal(e1.metadata.yellowCount, 1);
+  assert.equal(e1.metadata.singleHintCount, 1);
+  assert.equal(e1.metadata.doubleHintCount, 1);
+  assert.equal(e1.metadata.totalHintWeight, 3);
+  assert.equal(e1.metadata.accuracyPenalty, 6);
+  assert.equal(e1.metadata.isPerfect, false);
+
+  assert.equal(e2.difficulty, 'Brutal');
+  assert.equal(e2.metadata.difficultyOverride, true);
+  assert.equal(e2.metadata.isPerfect, true);
+
+  // manual_override = 1 keeps primary_value=99 & display_value='1:39' while adding accuracy metadata
+  assert.equal(e3.primaryValue, 99);
+  assert.equal(e3.displayValue, '1:39');
+  assert.equal(e3.metadata.singleHintCount, 1);
+  assert.equal(e3.metadata.accuracyPenalty, 3);
+
+  assert.ok(
+    harness.sqliteDb
+      .prepare("SELECT 1 FROM schema_migrations WHERE id = 'clues_accuracy_sizeitup_and_collections_v1'")
+      .get(),
+  );
 
   harness.sqliteDb.close();
 });

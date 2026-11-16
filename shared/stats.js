@@ -1,4 +1,4 @@
-import { STARTER_GAMES } from './auth-crypto.js';
+import { STARTER_GAMES, BUILTIN_CATALOG_BY_SLUG, enrichGameMetadata } from './auth-crypto.js';
 import { extractEmojiGrid } from './parsers/utils.js';
 import {
   CLUES_BY_SAM_DIFFICULTIES,
@@ -6,7 +6,123 @@ import {
   getLocalDateString,
   formatMetricValue,
   getGamePuzzleStatus,
+  analyzeCluesBySamGrid,
 } from './parsers/registry.js';
+
+export function isCluesBySamGame(game) {
+  return Boolean(
+    game &&
+      (game.slug === 'cluesbysam' ||
+        game.parserId === 'cluesbysam' ||
+        game.resolvedParser?.id === 'cluesbysam'),
+  );
+}
+
+export function getCluesBySamAccuracy(entry) {
+  const m = entry?.metadata;
+  if (
+    m &&
+    typeof m === 'object' &&
+    m.accuracyPenalty !== null &&
+    m.accuracyPenalty !== undefined &&
+    m.accuracyPenalty !== '' &&
+    Number.isFinite(Number(m.accuracyPenalty)) &&
+    Number(m.totalTiles) > 0
+  ) {
+    const greenCount = Number(m.greenCount ?? m.cleanCount ?? 0);
+    const yellowCount = Number(m.yellowCount ?? m.mistakeCount ?? 0);
+    const singleHintCount = Number(m.singleHintCount ?? 0);
+    const doubleHintCount = Number(m.doubleHintCount ?? 0);
+    const totalTiles = Number(m.totalTiles);
+    const accuracyPenalty = Number(m.accuracyPenalty);
+    const isPerfect = Boolean(m.isPerfect ?? (totalTiles > 0 && accuracyPenalty === 0));
+    let accuracySummary =
+      typeof m.accuracySummary === 'string' && m.accuracySummary.trim()
+        ? m.accuracySummary.trim()
+        : null;
+    if (!accuracySummary && totalTiles > 0) {
+      accuracySummary = isPerfect
+        ? `${greenCount}/${totalTiles} 🟩`
+        : [
+            greenCount && `${greenCount}🟩`,
+            yellowCount && `${yellowCount}🟨`,
+            singleHintCount && `${singleHintCount}🟡`,
+            doubleHintCount && `${doubleHintCount}🟠`,
+          ]
+            .filter(Boolean)
+            .join(' ');
+    }
+    return {
+      hasGrid: true,
+      accuracyPenalty,
+      greenCount,
+      yellowCount,
+      singleHintCount,
+      doubleHintCount,
+      totalTiles,
+      isPerfect,
+      accuracySummary,
+    };
+  }
+
+  const gridText = extractShareGrid(entry);
+  const analyzed = analyzeCluesBySamGrid(gridText);
+  if (analyzed && analyzed.totalTiles > 0) {
+    return {
+      hasGrid: true,
+      accuracyPenalty: analyzed.accuracyPenalty,
+      greenCount: analyzed.greenCount,
+      yellowCount: analyzed.yellowCount,
+      singleHintCount: analyzed.singleHintCount,
+      doubleHintCount: analyzed.doubleHintCount,
+      totalTiles: analyzed.totalTiles,
+      isPerfect: analyzed.isPerfect,
+      accuracySummary: analyzed.accuracySummary,
+    };
+  }
+
+  return {
+    hasGrid: false,
+    accuracyPenalty: null,
+    accuracySummary: null,
+  };
+}
+
+export function compareCluesBySamEntries(entryA, entryB) {
+  const aSolved = entryA?.solved !== false;
+  const bSolved = entryB?.solved !== false;
+  if (aSolved !== bSolved) return aSolved ? -1 : 1;
+  if (!aSolved && !bSolved) return 0;
+
+  const accA = getCluesBySamAccuracy(entryA);
+  const accB = getCluesBySamAccuracy(entryB);
+  if (accA.hasGrid && accB.hasGrid) {
+    if (accA.accuracyPenalty !== accB.accuracyPenalty) {
+      return accA.accuracyPenalty - accB.accuracyPenalty;
+    }
+  } else if (accA.hasGrid !== accB.hasGrid) {
+    return accA.hasGrid ? -1 : 1;
+  }
+
+  const aHasTime =
+    entryA?.primaryValue !== null &&
+    entryA?.primaryValue !== undefined &&
+    entryA?.primaryValue !== '' &&
+    Number.isFinite(Number(entryA.primaryValue));
+  const bHasTime =
+    entryB?.primaryValue !== null &&
+    entryB?.primaryValue !== undefined &&
+    entryB?.primaryValue !== '' &&
+    Number.isFinite(Number(entryB.primaryValue));
+
+  if (aHasTime && bHasTime) {
+    const diff = Number(entryA.primaryValue) - Number(entryB.primaryValue);
+    if (diff !== 0) return diff;
+    return 0;
+  }
+  if (aHasTime !== bHasTime) return aHasTime ? -1 : 1;
+  return 0;
+}
 
 export const DIFFICULTY_COLORS = Object.freeze({
   Easy: '#10b981',
@@ -234,7 +350,60 @@ export function computeStreaks(entries, referenceDate = getLocalDateString()) {
   return computeStreaksFromDateSet(playedDates, referenceDate);
 }
 
-export function computePersonalBest(entries, metricDirection = 'higher_is_better') {
+export function computePersonalBest(entries, metricDirection = 'higher_is_better', game = null) {
+  if (isCluesBySamGame(game)) {
+    let bestEntry = null;
+    let bestAcc = null;
+
+    for (const entry of entries) {
+      if (!entry || !entry.completed || entry.solved === false) continue;
+      const acc = getCluesBySamAccuracy(entry);
+      const hasNumeric =
+        entry.primaryValue !== null &&
+        entry.primaryValue !== undefined &&
+        entry.primaryValue !== '' &&
+        Number.isFinite(Number(entry.primaryValue));
+      if (!hasNumeric && !acc.hasGrid) continue;
+
+      if (!bestEntry) {
+        bestEntry = entry;
+        bestAcc = acc;
+        continue;
+      }
+
+      const cmp = compareCluesBySamEntries(entry, bestEntry);
+      if (cmp < 0 || (cmp === 0 && String(entry.playDate || '') > String(bestEntry.playDate || ''))) {
+        bestEntry = entry;
+        bestAcc = acc;
+      }
+    }
+
+    if (!bestEntry) return null;
+    const hasNumeric =
+      bestEntry.primaryValue !== null &&
+      bestEntry.primaryValue !== undefined &&
+      bestEntry.primaryValue !== '' &&
+      Number.isFinite(Number(bestEntry.primaryValue));
+    const val = hasNumeric ? Number(bestEntry.primaryValue) : null;
+
+    return {
+      value: val,
+      displayValue:
+        bestEntry.displayValue ??
+        (val !== null
+          ? formatStatNumber(val, game?.metricFormat || 'duration_sec')
+          : bestAcc?.accuracySummary || 'Solved'),
+      playDate: bestEntry.playDate,
+      ...(bestAcc?.hasGrid
+        ? {
+            accuracyPenalty: bestAcc.accuracyPenalty,
+            accuracySummary: bestAcc.accuracySummary,
+            isPerfect: bestAcc.isPerfect,
+          }
+        : {}),
+    };
+  }
+
   let best = null;
   const lowerIsBetter = metricDirection === 'lower_is_better';
 
@@ -294,7 +463,7 @@ export function computeCardSummaries(
 
     const gameEntries = (byGame.get(game.id) || []).filter((e) => e.completed);
     const { currentStreak, longestStreak } = computeStreaks(gameEntries, anchorDate);
-    const personalBest = computePersonalBest(gameEntries, game.metricDirection);
+    const personalBest = computePersonalBest(gameEntries, game.metricDirection, game);
 
     const byDate = new Map();
     for (const e of gameEntries) {
@@ -465,7 +634,7 @@ export function computeLeaderboard(games, allEntries, referenceDate = getLocalDa
   const rows = activeGames.map((game) => {
     const gameEntries = (byGame.get(game.id) || []).filter((e) => e.completed);
     const { currentStreak, longestStreak } = computeStreaks(gameEntries, referenceDate);
-    const personalBest = computePersonalBest(gameEntries, game.metricDirection);
+    const personalBest = computePersonalBest(gameEntries, game.metricDirection, game);
 
     const played30d = gameEntries.filter(
       (e) => e.playDate >= cutoff30d && e.playDate <= referenceDate,
@@ -709,7 +878,8 @@ export function computeGameStats(
     medianDisplay = formatStatNumber(med, game.metricFormat);
   }
 
-  const personalBest = computePersonalBest(completedInWindow, game.metricDirection);
+  const personalBest = computePersonalBest(completedInWindow, game.metricDirection, game);
+  const cluesGame = isCluesBySamGame(game);
 
   const rollingBuffer = [];
   const trendSeries = completedInWindow.map((entry) => {
@@ -731,11 +901,32 @@ export function computeGameStats(
       rollingAvgDisplay = formatStatNumber(avg, game.metricFormat);
     }
 
-    const isPersonalBest = Boolean(
-      personalBest &&
-        hasNumeric &&
-        entry.primaryValue === personalBest.value,
-    );
+    const acc = cluesGame ? getCluesBySamAccuracy(entry) : null;
+    let isPersonalBest = false;
+    if (personalBest && entry.solved !== false) {
+      if (cluesGame) {
+        const pbHasPenalty =
+          personalBest.accuracyPenalty !== null &&
+          personalBest.accuracyPenalty !== undefined &&
+          Number.isFinite(Number(personalBest.accuracyPenalty));
+        const sameValue =
+          personalBest.value !== null && personalBest.value !== undefined
+            ? hasNumeric && Number(entry.primaryValue) === personalBest.value
+            : !hasNumeric;
+        if (pbHasPenalty) {
+          isPersonalBest =
+            Boolean(acc?.hasGrid) &&
+            acc.accuracyPenalty === personalBest.accuracyPenalty &&
+            sameValue;
+        } else {
+          isPersonalBest =
+            !acc?.hasGrid &&
+            (sameValue || entry.playDate === personalBest.playDate);
+        }
+      } else {
+        isPersonalBest = Boolean(hasNumeric && entry.primaryValue === personalBest.value);
+      }
+    }
 
     const rawSnippet = entry.rawText
       ? entry.rawText.trim().replace(/\s+/g, ' ').slice(0, 120)
@@ -752,6 +943,12 @@ export function computeGameStats(
       difficulty: getEntryDifficulty(entry),
       isPersonalBest,
       rawSnippet,
+      ...(cluesGame
+        ? {
+            accuracyPenalty: acc?.hasGrid ? acc.accuracyPenalty : null,
+            accuracySummary: acc?.accuracySummary ?? null,
+          }
+        : {}),
     };
   });
 
@@ -791,6 +988,9 @@ export function extractShareGrid(entry) {
   if (typeof entry?.metadata?.emojiGrid === 'string' && entry.metadata.emojiGrid.trim()) {
     return entry.metadata.emojiGrid.trim();
   }
+  if (typeof entry?.metadata?.grid === 'string' && entry.metadata.grid.trim()) {
+    return entry.metadata.grid.trim();
+  }
   if (typeof entry?.rawText !== 'string' || !entry.rawText.trim()) {
     return null;
   }
@@ -807,6 +1007,15 @@ function compareAverageNullable(aVal, bVal, metricDirection) {
   return metricDirection === 'lower_is_better' ? aVal - bVal : bVal - aVal;
 }
 
+function compareNullableAsc(aVal, bVal) {
+  const aNull = aVal === null || aVal === undefined || !Number.isFinite(aVal);
+  const bNull = bVal === null || bVal === undefined || !Number.isFinite(bVal);
+  if (aNull && bNull) return 0;
+  if (aNull) return 1;
+  if (bNull) return -1;
+  return aVal - bVal;
+}
+
 export function computePlayersLeaderboard({
   users = [],
   allGames = [],
@@ -821,6 +1030,9 @@ export function computePlayersLeaderboard({
   viewerTimeZone = undefined,
 } = {}) {
   const activeDifficulty = normalizeDifficultyFilter(difficulty);
+  const isCompetingGame = (g) => Boolean(g && !g.archived && g.compete !== false);
+  const viewerHasDefined = viewerUserId !== null && viewerUserId !== undefined;
+
   const gameById = new Map();
   const viewerGamesBySlug = new Map();
   const anyGameBySlug = new Map();
@@ -830,12 +1042,11 @@ export function computePlayersLeaderboard({
   const viewerArchivedSlugs = new Set();
   const activePlayersBySlug = new Map();
   const starterIndexBySlug = new Map(STARTER_GAMES.map((g, idx) => [g.slug, idx]));
-  const starterBySlug = new Map(STARTER_GAMES.map((g) => [g.slug, g]));
 
   for (const g of allGames) {
     if (!g) continue;
     gameById.set(g.id, g);
-    if (!g.archived) {
+    if (isCompetingGame(g)) {
       slugsWithActive.add(g.slug);
       if (g.userId !== null && g.userId !== undefined) {
         let userSet = activePlayersBySlug.get(g.slug);
@@ -846,7 +1057,7 @@ export function computePlayersLeaderboard({
         userSet.add(g.userId);
       }
     }
-    if (g.userId === viewerUserId) {
+    if (viewerHasDefined && g.userId === viewerUserId) {
       if (!viewerGamesBySlug.has(g.slug)) {
         viewerGamesBySlug.set(g.slug, g);
       }
@@ -857,7 +1068,11 @@ export function computePlayersLeaderboard({
       }
     }
     const existingAny = anyGameBySlug.get(g.slug);
-    if (!existingAny || (existingAny.archived && !g.archived)) {
+    if (
+      !existingAny ||
+      (existingAny.archived && !g.archived) ||
+      (!isCompetingGame(existingAny) && isCompetingGame(g))
+    ) {
       anyGameBySlug.set(g.slug, g);
     }
   }
@@ -865,38 +1080,41 @@ export function computePlayersLeaderboard({
   for (const e of allEntries) {
     if (!e || !e.completed || !parseYmd(e.playDate)) continue;
     const g = gameById.get(e.gameId);
-    if (g) {
+    if (g && isCompetingGame(g)) {
       slugsWithCompletedEntries.add(g.slug);
     }
   }
 
-  const includedSlugs = Array.from(new Set([...slugsWithActive, ...slugsWithCompletedEntries]));
-  const viewerActiveOrder = new Map();
-  const viewerActiveGames = allGames
-    .filter((g) => g && g.userId === viewerUserId && !g.archived)
-    .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
-  viewerActiveGames.forEach((g, idx) => {
-    if (!viewerActiveOrder.has(g.slug)) {
-      viewerActiveOrder.set(g.slug, idx);
-    }
-  });
+  const viewerCompetingOrder = new Map();
+  if (viewerHasDefined) {
+    const viewerCompetingGames = allGames
+      .filter((g) => g && g.userId === viewerUserId && isCompetingGame(g))
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
+    viewerCompetingGames.forEach((g, idx) => {
+      if (!viewerCompetingOrder.has(g.slug)) {
+        viewerCompetingOrder.set(g.slug, idx);
+      }
+    });
+  }
 
-  includedSlugs.sort((a, b) => {
-    const va = viewerActiveOrder.has(a);
-    const vb = viewerActiveOrder.has(b);
-    if (va && vb) return viewerActiveOrder.get(a) - viewerActiveOrder.get(b);
-    if (va !== vb) return va ? -1 : 1;
-
-    const sa = starterIndexBySlug.has(a);
-    const sb = starterIndexBySlug.has(b);
-    if (sa && sb) return starterIndexBySlug.get(a) - starterIndexBySlug.get(b);
-    if (sa !== sb) return sa ? -1 : 1;
-
-    return a.localeCompare(b);
-  });
+  const includedSlugs = viewerHasDefined
+    ? Array.from(viewerCompetingOrder.keys())
+    : Array.from(new Set([...slugsWithActive, ...slugsWithCompletedEntries])).sort((a, b) => {
+        const sa = starterIndexBySlug.has(a);
+        const sb = starterIndexBySlug.has(b);
+        if (sa && sb) return starterIndexBySlug.get(a) - starterIndexBySlug.get(b);
+        if (sa !== sb) return sa ? -1 : 1;
+        return a.localeCompare(b);
+      });
 
   const catalogGames = includedSlugs.map((slug) => {
-    const meta = viewerGamesBySlug.get(slug) || starterBySlug.get(slug) || anyGameBySlug.get(slug);
+    const meta =
+      viewerGamesBySlug.get(slug) || BUILTIN_CATALOG_BY_SLUG.get(slug) || anyGameBySlug.get(slug);
+    const enriched = enrichGameMetadata({
+      ...(meta || {}),
+      slug,
+      category: String(meta?.category || 'Daily'),
+    });
     const base = {
       slug,
       name: String(meta?.name || slug),
@@ -911,6 +1129,7 @@ export function computePlayersLeaderboard({
       parserId: String(meta?.parserId || 'auto'),
       resetTimezone: String(meta?.resetTimezone || 'local'),
       resetTime: String(meta?.resetTime || '00:00'),
+      ...enriched,
     };
     const puzzleStatus = getGamePuzzleStatus(base, now, viewerTimeZone);
     const targetDate = live ? puzzleStatus.activePuzzleDate : referenceDate;
@@ -960,7 +1179,7 @@ export function computePlayersLeaderboard({
   for (const entry of allEntries) {
     if (!entry || !entry.completed || !parseYmd(entry.playDate)) continue;
     const game = gameById.get(entry.gameId);
-    if (!game || !catalogBySlug.has(game.slug)) continue;
+    if (!game || !catalogBySlug.has(game.slug) || !isCompetingGame(game)) continue;
     const userId = entry.userId ?? game.userId;
     if (userId === null || userId === undefined) continue;
 
@@ -1016,6 +1235,7 @@ export function computePlayersLeaderboard({
   for (const [bucketKey, items] of buckets.entries()) {
     const slug = bucketKey.split(':')[0];
     const cg = catalogBySlug.get(slug);
+    const cluesMode = isCluesBySamGame(cg);
     const lowerIsBetter = cg.metricDirection === 'lower_is_better';
 
     const numericItems = [];
@@ -1023,23 +1243,35 @@ export function computePlayersLeaderboard({
 
     for (const item of items) {
       const val = item.entry.primaryValue;
-      if (item.entry.solved !== false && val !== null && val !== undefined && Number.isFinite(Number(val))) {
-        numericItems.push({ ...item, numericValue: Number(val) });
+      const hasNumeric =
+        val !== null && val !== undefined && val !== '' && Number.isFinite(Number(val));
+      const hasGrid = cluesMode ? getCluesBySamAccuracy(item.entry).hasGrid : false;
+      if (item.entry.solved !== false && (hasNumeric || hasGrid)) {
+        numericItems.push({ ...item, numericValue: hasNumeric ? Number(val) : null });
       } else {
         unrankedItems.push(item);
       }
     }
 
-    numericItems.sort((a, b) =>
-      lowerIsBetter ? a.numericValue - b.numericValue : b.numericValue - a.numericValue,
-    );
+    if (cluesMode) {
+      numericItems.sort((a, b) => compareCluesBySamEntries(a.entry, b.entry));
+    } else {
+      numericItems.sort((a, b) =>
+        lowerIsBetter ? a.numericValue - b.numericValue : b.numericValue - a.numericValue,
+      );
+    }
 
     let prevRank = 0;
-    let prevValue = null;
+    let prevItem = null;
     numericItems.forEach((item, idx) => {
-      const rank = prevValue !== null && item.numericValue === prevValue ? prevRank : idx + 1;
+      const isTie =
+        prevItem !== null &&
+        (cluesMode
+          ? compareCluesBySamEntries(prevItem.entry, item.entry) === 0
+          : item.numericValue === prevItem.numericValue);
+      const rank = isTie ? prevRank : idx + 1;
       prevRank = rank;
-      prevValue = item.numericValue;
+      prevItem = item;
 
       const medal = rank === 1 ? 'gold' : rank === 2 ? 'silver' : rank === 3 ? 'bronze' : null;
       const points = rank === 1 ? 3 : rank === 2 ? 2 : 1;
@@ -1087,8 +1319,7 @@ export function computePlayersLeaderboard({
 
   for (const cg of catalogGames) {
     cg.viewerCleared = Boolean(
-      viewerUserId !== null &&
-        viewerUserId !== undefined &&
+      viewerHasDefined &&
         scoredByUserSlugDate.has(`${viewerUserId}:${cg.slug}:${cg.targetDate}`),
     );
   }
@@ -1099,6 +1330,7 @@ export function computePlayersLeaderboard({
       ? entry.playDate === cg.puzzleStatus.activePuzzleDate
       : entry.playDate >= cg.puzzleStatus.activePuzzleDate;
     const redact = Boolean(isActiveCycle && entry.userId !== viewerUserId && !cg.viewerCleared);
+    const cluesAcc = isCluesBySamGame(cg) ? getCluesBySamAccuracy(entry) : null;
 
     return {
       displayValue:
@@ -1118,6 +1350,12 @@ export function computePlayersLeaderboard({
       spoilerProtected: redact,
       emojiGrid: redact ? null : extractShareGrid(entry),
       notes: redact ? '' : String(entry.notes || ''),
+      ...(cluesAcc
+        ? {
+            accuracyPenalty: cluesAcc.hasGrid ? cluesAcc.accuracyPenalty : null,
+            accuracySummary: redact ? null : cluesAcc.accuracySummary,
+          }
+        : {}),
     };
   };
 
@@ -1157,7 +1395,12 @@ export function computePlayersLeaderboard({
 
     const userGames = gamesByUserId.get(user.id) || [];
     const userEntries = entriesByUserId.get(user.id) || [];
-    const completedUserEntries = userEntries.filter((e) => e.completed);
+    const competingUserGames = userGames.filter(
+      (g) => isCompetingGame(g) && catalogBySlug.has(g.slug),
+    );
+    const competingGameIds = new Set(competingUserGames.map((g) => g.id));
+    const competingUserEntries = userEntries.filter((e) => competingGameIds.has(e.gameId));
+    const completedCompetingEntries = competingUserEntries.filter((e) => e.completed);
 
     let clearedTodayCount = 0;
     let todayPoints = 0;
@@ -1173,14 +1416,25 @@ export function computePlayersLeaderboard({
       }
     }
 
-    const routineOverview = computeDailyOverview(userGames, userEntries, referenceDate, {
-      live,
-      now,
-      viewerTimeZone,
-    });
-    const activeGamesCount = userGames.filter((g) => !g.archived).length || catalogGames.length;
-    const routineStreak = completedUserEntries.length === 0 ? 0 : routineOverview.routineStreak;
-    const fullSweepDays = completedUserEntries.length === 0 ? 0 : routineOverview.fullSweepDays;
+    const routineOverview = computeDailyOverview(
+      competingUserGames,
+      competingUserEntries,
+      referenceDate,
+      {
+        live,
+        now,
+        viewerTimeZone,
+      },
+    );
+    const activeGamesCount = catalogGames.length;
+    const routineStreak =
+      competingUserGames.length === 0 || completedCompetingEntries.length === 0
+        ? 0
+        : routineOverview.routineStreak;
+    const fullSweepDays =
+      competingUserGames.length === 0 || completedCompetingEntries.length === 0
+        ? 0
+        : routineOverview.fullSweepDays;
 
     return {
       rank: 0,
@@ -1276,6 +1530,12 @@ export function computePlayersLeaderboard({
       viewerArchivedGame: !viewerActiveSlugs.has(cg.slug) && viewerArchivedSlugs.has(cg.slug),
       playerCount: activePlayersBySlug.get(cg.slug)?.size || 0,
       supportsDifficulty: supportsDiff,
+      isStarter: Boolean(cg.isStarter),
+      isOptional: Boolean(cg.isOptional),
+      collection: cg.collection ?? null,
+      tags: Array.isArray(cg.tags) ? cg.tags : [],
+      tagline: cg.tagline ?? null,
+      isCluesBySam: isCluesBySamGame(cg),
     };
   };
 
@@ -1312,6 +1572,7 @@ export function computePlayersLeaderboard({
 
   const buildGameBoardForCatalogGame = (cg, diffFilter = null) => {
     const slug = cg.slug;
+    const cluesMode = isCluesBySamGame(cg);
     const gameOut = {
       ...serializeCatalogGame(cg),
       difficultyOptions: buildDifficultyOptions(cg, dedupedEntriesBySlug.get(slug) || []),
@@ -1331,6 +1592,7 @@ export function computePlayersLeaderboard({
       let gamePoints = 0;
       const medals = { gold: 0, silver: 0, bronze: 0 };
       const numericVals = [];
+      const penalties = [];
 
       for (const s of windowScored) {
         gamePoints += s.points;
@@ -1338,13 +1600,20 @@ export function computePlayersLeaderboard({
         else if (s.medal === 'silver') medals.silver += 1;
         else if (s.medal === 'bronze') medals.bronze += 1;
 
-        if (
-          s.entry.solved !== false &&
-          s.entry.primaryValue !== null &&
-          s.entry.primaryValue !== undefined &&
-          Number.isFinite(Number(s.entry.primaryValue))
-        ) {
-          numericVals.push(Number(s.entry.primaryValue));
+        if (s.entry.solved !== false) {
+          if (
+            s.entry.primaryValue !== null &&
+            s.entry.primaryValue !== undefined &&
+            Number.isFinite(Number(s.entry.primaryValue))
+          ) {
+            numericVals.push(Number(s.entry.primaryValue));
+          }
+          if (cluesMode) {
+            const acc = getCluesBySamAccuracy(s.entry);
+            if (acc.hasGrid) {
+              penalties.push(acc.accuracyPenalty);
+            }
+          }
         }
       }
 
@@ -1356,9 +1625,15 @@ export function computePlayersLeaderboard({
         averageDisplay = formatStatNumber(avg, cg.metricFormat);
       }
 
+      let averagePenalty = null;
+      if (cluesMode && penalties.length > 0) {
+        averagePenalty = round2(penalties.reduce((acc, v) => acc + v, 0) / penalties.length);
+      }
+
       const pb = computePersonalBest(
         windowScored.map((s) => s.entry),
         cg.metricDirection,
+        cg,
       );
       const { currentStreak, longestStreak } = computeStreaks(
         allSlugEntries,
@@ -1388,6 +1663,13 @@ export function computePlayersLeaderboard({
         averageDisplay,
         personalBestDisplay: pb ? pb.displayValue : null,
         personalBestValue: pb ? pb.value : null,
+        ...(cluesMode
+          ? {
+              averagePenalty,
+              personalBestPenalty: pb?.accuracyPenalty ?? null,
+              personalBestAccuracySummary: pb?.accuracySummary ?? null,
+            }
+          : {}),
         today: todayScored ? formatCell(cg, todayScored) : null,
       };
     });
@@ -1395,6 +1677,7 @@ export function computePlayersLeaderboard({
     standings.sort(
       (a, b) =>
         b.gamePoints - a.gamePoints ||
+        (cluesMode ? compareNullableAsc(a.averagePenalty, b.averagePenalty) : 0) ||
         compareAverageNullable(a.averageValue, b.averageValue, cg.metricDirection) ||
         b.currentStreak - a.currentStreak ||
         b.totalPlayed - a.totalPlayed ||
@@ -1406,6 +1689,7 @@ export function computePlayersLeaderboard({
       if (
         prevGameRow &&
         prevGameRow.gamePoints === row.gamePoints &&
+        (!cluesMode || prevGameRow.averagePenalty === row.averagePenalty) &&
         prevGameRow.averageValue === row.averageValue &&
         prevGameRow.currentStreak === row.currentStreak &&
         prevGameRow.totalPlayed === row.totalPlayed
@@ -1461,6 +1745,7 @@ export function computePlayersLeaderboard({
     live: Boolean(live),
     days: hasWindowDays ? Math.trunc(days) : null,
     totalPlayers: users.length,
+    competingGamesCount: catalogGamesOut.length,
     selectedGameSlug: selectedCatalogGame ? selectedCatalogGame.slug : null,
     filters: {
       gameSlug: selectedCatalogGame ? selectedCatalogGame.slug : null,

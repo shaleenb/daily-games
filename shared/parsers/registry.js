@@ -1,12 +1,15 @@
 import { GENERIC_PARSER } from './generic.js';
 import {
   CLUES_BY_SAM_DIFFICULTIES,
+  analyzeCluesBySamGrid,
   cluesBySamParser,
   normalizeDifficultyLabel,
 } from './games/cluesbysam.js';
 import { ERALY_BANDS, eralyParser } from './games/eraly.js';
 import { fermiParser } from './games/fermi.js';
+import { flightqParser } from './games/flightq.js';
 import { magnitudleParser } from './games/magnitudle.js';
+import { passportqParser } from './games/passportq.js';
 import { PERCEPTLE_ROUNDS, perceptleParser } from './games/perceptle.js';
 import { plainParser } from './games/plain.js';
 import { timeguessrParser } from './games/timeguessr.js';
@@ -32,6 +35,8 @@ export const PARSERS = [
   eralyParser,
   fermiParser,
   magnitudleParser,
+  passportqParser,
+  flightqParser,
   perceptleParser,
   plainParser,
   timeguessrParser,
@@ -41,6 +46,7 @@ export const PARSERS = [
 export {
   GENERIC_PARSER,
   CLUES_BY_SAM_DIFFICULTIES,
+  analyzeCluesBySamGrid,
   normalizeDifficultyLabel,
   ERALY_BANDS,
   PERCEPTLE_ROUNDS,
@@ -163,7 +169,61 @@ export function parseForGame(rawText, game = {}) {
   return parser.parse(rawText, game || {});
 }
 
-function findGameForCustomParser(customParser, activeGames) {
+const DETECTED_SLUG_ALIASES = new Map([
+  ['size-it-up', 'magnitudle'],
+  ['sizeitup', 'magnitudle'],
+  ['weighitup', 'weigh-it-up'],
+  ['flightq', 'skyq'],
+  ['layers', 'strata'],
+  ['scaleq', 'airspan'],
+]);
+
+function canonicalizeGameSlug(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return '';
+  const lower = raw.trim().toLowerCase();
+  return DETECTED_SLUG_ALIASES.get(lower) || lower;
+}
+
+function getGameDetectionSlugs(game) {
+  const out = new Set();
+  const rawValues = [
+    game?.slug,
+    slugify(game?.name),
+    compactSlug(game?.name),
+    ...(Array.isArray(game?.aliases) ? game.aliases : []),
+  ];
+  for (const val of rawValues) {
+    if (typeof val !== 'string' || !val.trim()) continue;
+    const lower = val.trim().toLowerCase();
+    const slugified = slugify(val);
+    const compacted = compactSlug(val);
+    for (const candidate of [lower, slugified, compacted]) {
+      if (!candidate) continue;
+      out.add(candidate);
+      out.add(canonicalizeGameSlug(candidate));
+    }
+  }
+  return out;
+}
+
+function findGameForCustomParser(customParser, activeGames, rawText = '') {
+  const detectedSlug =
+    typeof customParser.detectGameSlug === 'function'
+      ? customParser.detectGameSlug(rawText)
+      : null;
+
+  if (detectedSlug) {
+    const targetLower = String(detectedSlug).trim().toLowerCase();
+    const targetCanonical = canonicalizeGameSlug(targetLower);
+    const slugHit = activeGames.find((g) => {
+      const pid = typeof g.parserId === 'string' ? g.parserId.trim().toLowerCase() : '';
+      if (pid === 'generic') return false;
+      const gameSlugs = getGameDetectionSlugs(g);
+      return gameSlugs.has(targetLower) || (targetCanonical && gameSlugs.has(targetCanonical));
+    });
+    return slugHit || null;
+  }
+
   // 1. Explicit parserId match
   const explicit = activeGames.find(
     (g) => typeof g.parserId === 'string' && g.parserId.trim().toLowerCase() === customParser.id.toLowerCase()
@@ -210,7 +270,7 @@ export function detectGameAndParse(rawText, games = []) {
     (parser) => typeof parser.canParse === 'function' && parser.canParse(text)
   );
   if (matchedCustomParser) {
-    const matchedGame = findGameForCustomParser(matchedCustomParser, activeGames);
+    const matchedGame = findGameForCustomParser(matchedCustomParser, activeGames, text);
     const parser = matchedGame ? getParserForGame(matchedGame) : matchedCustomParser;
     const parsed = parser.parse(text, matchedGame || {});
     return {

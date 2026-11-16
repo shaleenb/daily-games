@@ -12,6 +12,7 @@ import {
   GENERIC_PARSER,
   PARSERS,
   PERCEPTLE_ROUNDS,
+  analyzeCluesBySamGrid,
   detectGameAndParse,
   extractEmojiGrid,
   formatCountdownCompact,
@@ -28,6 +29,11 @@ import {
   slugify,
 } from '/shared/parsers/registry.js';
 import {
+  OPTIONAL_CATALOG_GAMES,
+  STARTER_GAMES,
+  enrichGameMetadata,
+} from '/shared/auth-crypto.js';
+import {
   THEMES,
   applyTheme,
   getSavedThemeId,
@@ -35,7 +41,14 @@ import {
   initThemeSystem,
   resolveActiveTheme,
 } from './themes.js';
-import { computeGameStats, computeHeatmap, computeLeaderboard } from '/shared/stats.js';
+import {
+  compareCluesBySamEntries,
+  computeGameStats,
+  computeHeatmap,
+  computeLeaderboard,
+  getCluesBySamAccuracy,
+  isCluesBySamGame,
+} from '/shared/stats.js';
 
 const SCORING_PRESETS = {
   points: {
@@ -64,12 +77,20 @@ const state = {
   user: null,
   authMode: 'signin',
   isSubmittingAuth: false,
+  signupCatalog: null,
+  signupSelectedSlugs: new Set(),
+  signupPickerInitialized: false,
   activeTab: 'today',
   todayStr: getLocalDateString(),
   selectedDate: getLocalDateString(),
+  todaySelectedTag: 'All',
   games: [],
   catalog: [],
   subscribingSlugs: new Set(),
+  dialogCatalogTag: 'All',
+  friendsCatalogTag: 'All',
+  friendsCatalogSearch: '',
+  openCatalogCollections: new Set(['community', 'magnitudle']),
   parsers: [],
   entriesForDate: [],
   allEntries: [],
@@ -300,6 +321,87 @@ function getActiveGames() {
   return state.games.filter((g) => !g.archived);
 }
 
+function getGameTags(game) {
+  const raw = Array.isArray(game?.tags) && game.tags.length > 0 ? game.tags : [];
+  const seen = new Set();
+  const out = [];
+  for (const t of raw) {
+    const label = typeof t === 'string' ? t.trim() : '';
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(label);
+  }
+  if (out.length === 0 && typeof game?.category === 'string' && game.category.trim()) {
+    out.push(game.category.trim());
+  }
+  return out;
+}
+
+function safeIsCluesBySamGame(game) {
+  if (typeof isCluesBySamGame === 'function') {
+    return isCluesBySamGame(game);
+  }
+  if (!game) return false;
+  return (
+    game.slug === 'cluesbysam' ||
+    game.parserId === 'cluesbysam' ||
+    game.resolvedParser?.id === 'cluesbysam'
+  );
+}
+
+function safeGetCluesBySamAccuracy(item) {
+  if (!item || typeof item !== 'object') {
+    return { hasGrid: false, accuracyPenalty: null, isPerfect: false, accuracySummary: null };
+  }
+  if (typeof getCluesBySamAccuracy === 'function') {
+    const res = getCluesBySamAccuracy(item);
+    if (res && typeof res === 'object') return res;
+  }
+  const m = item.metadata;
+  if (m && typeof m === 'object' && m.accuracySummary) {
+    return {
+      hasGrid: true,
+      accuracyPenalty: Number.isFinite(Number(m.accuracyPenalty)) ? Number(m.accuracyPenalty) : null,
+      isPerfect: Boolean(m.isPerfect),
+      accuracySummary: String(m.accuracySummary),
+    };
+  }
+  const grid =
+    (typeof m?.emojiGrid === 'string' && m.emojiGrid.trim()) ||
+    (typeof item.rawText === 'string' && extractEmojiGrid(item.rawText)) ||
+    '';
+  if (grid && typeof analyzeCluesBySamGrid === 'function') {
+    const analyzed = analyzeCluesBySamGrid(grid);
+    if (analyzed && Number(analyzed.totalTiles) > 0) {
+      return { hasGrid: true, ...analyzed };
+    }
+  }
+  return { hasGrid: false, accuracyPenalty: null, isPerfect: false, accuracySummary: null };
+}
+
+function safeCompareCluesBySamEntries(entryA, entryB) {
+  if (typeof compareCluesBySamEntries === 'function') {
+    return compareCluesBySamEntries(entryA, entryB);
+  }
+  const solvedA = entryA?.solved !== false;
+  const solvedB = entryB?.solved !== false;
+  if (solvedA !== solvedB) return solvedA ? -1 : 1;
+  if (!solvedA && !solvedB) return 0;
+  const accA = safeGetCluesBySamAccuracy(entryA);
+  const accB = safeGetCluesBySamAccuracy(entryB);
+  if (accA.hasGrid && accB.hasGrid && accA.accuracyPenalty !== accB.accuracyPenalty) {
+    return accA.accuracyPenalty - accB.accuracyPenalty;
+  }
+  if (accA.hasGrid !== accB.hasGrid) return accA.hasGrid ? -1 : 1;
+  const tA = entryA?.primaryValue !== null && Number.isFinite(Number(entryA?.primaryValue)) ? Number(entryA.primaryValue) : null;
+  const tB = entryB?.primaryValue !== null && Number.isFinite(Number(entryB?.primaryValue)) ? Number(entryB.primaryValue) : null;
+  if (tA !== null && tB !== null) return tA - tB;
+  if (tA !== null || tB !== null) return tA !== null ? -1 : 1;
+  return 0;
+}
+
 function getGameById(gameId) {
   const idNum = Number(gameId);
   return state.games.find((g) => g.id === idNum) || null;
@@ -489,6 +591,14 @@ function cacheElements() {
   els.signupName = $('signup-name');
   els.signupEmail = $('signup-email');
   els.signupPassword = $('new-password');
+  els.signupGamesFieldset = $('signup-games-fieldset');
+  els.signupSelectedCount = $('signup-selected-count');
+  els.btnSignupSelectAll = $('btn-signup-select-all');
+  els.btnSignupClearAll = $('btn-signup-clear-all');
+  els.signupFeaturedGames = $('signup-featured-games');
+  els.signupOptionalCollections = $('signup-optional-collections');
+  els.signupOptionalCount = $('signup-optional-count');
+  els.signupOptionalBody = $('signup-optional-body');
   els.btnSignupSubmit = $('btn-signup-submit');
   els.passwordToggleButtons = Array.from(document.querySelectorAll('[data-toggle-password]'));
 
@@ -520,6 +630,7 @@ function cacheElements() {
   els.btnQuickPasteSave = $('btn-quick-paste-save');
 
   // Today shelves
+  els.todayTagFilterBar = $('today-tag-filter-bar');
   els.toPlaySection = $('to-play-section');
   els.countToPlay = $('count-to-play');
   els.toPlayGrid = $('to-play-grid');
@@ -529,6 +640,7 @@ function cacheElements() {
 
   // Players Leaderboard view
   els.leaderboardPlayersSubtitle = $('leaderboard-players-subtitle');
+  els.lbCompetingScopeChip = $('lb-competing-scope-chip');
   els.btnLbPrevDay = $('btn-lb-prev-day');
   els.lbDatePretty = $('lb-date-pretty');
   els.lbDateInput = $('lb-date-input');
@@ -571,8 +683,13 @@ function cacheElements() {
 
   // My Games view & Parser Lab
   els.btnAddGameAdmin = $('btn-add-game-admin');
+  els.rosterCompeteBar = $('roster-compete-bar');
   els.manageGamesList = $('manage-games-list');
   els.friendsCatalogShelf = $('friends-catalog-shelf');
+  els.friendsCatalogCount = $('friends-catalog-count');
+  els.friendsCatalogSearch = $('friends-catalog-search');
+  els.friendsCatalogTagBar = $('friends-catalog-tag-bar');
+  els.friendsCatalogCollections = $('friends-catalog-collections');
   els.btnExportJson = $('btn-export-json');
   els.importFileInput = $('import-file-input');
   els.importFileSummary = $('import-file-summary');
@@ -620,6 +737,7 @@ function cacheElements() {
   els.btnCloseGameDialog = $('btn-close-game-dialog');
   els.catalogPickerSection = $('catalog-picker-section');
   els.catalogSearchInput = $('catalog-search-input');
+  els.catalogTagBar = $('catalog-tag-bar');
   els.catalogAvailableList = $('catalog-available-list');
   els.catalogOwnedDetails = $('catalog-owned-details');
   els.catalogOwnedSummary = $('catalog-owned-summary');
@@ -1007,9 +1125,53 @@ function renderTodayView() {
     els.btnOpenAllUnplayed.textContent = `Open All (${openableCount}) ↗`;
   }
 
+  // Today Shelf Tag Filter Strip
+  const tagGameCounts = new Map();
+  const shelfGamesSeen = new Set();
+  for (const g of [...activeGames, ...completedPairs.map((p) => p.game)]) {
+    if (!g || shelfGamesSeen.has(g.id)) continue;
+    shelfGamesSeen.add(g.id);
+    for (const tag of getGameTags(g)) {
+      tagGameCounts.set(tag, (tagGameCounts.get(tag) || 0) + 1);
+    }
+  }
+  const sortedShelfTags = Array.from(tagGameCounts.entries()).sort((a, b) =>
+    a[0].localeCompare(b[0])
+  );
+  if (sortedShelfTags.length < 2) {
+    state.todaySelectedTag = 'All';
+    if (els.todayTagFilterBar) {
+      els.todayTagFilterBar.innerHTML = '';
+      setHidden(els.todayTagFilterBar, true);
+    }
+  } else {
+    if (state.todaySelectedTag !== 'All' && !tagGameCounts.has(state.todaySelectedTag)) {
+      state.todaySelectedTag = 'All';
+    }
+    if (els.todayTagFilterBar) {
+      els.todayTagFilterBar.innerHTML = [
+        `<button type="button" class="tag-filter-pill${state.todaySelectedTag === 'All' ? ' is-active' : ''}" data-tag="All" aria-pressed="${state.todaySelectedTag === 'All' ? 'true' : 'false'}"><span>All</span><span class="difficulty-pill-count">${escapeHtml(String(shelfGamesSeen.size))}</span></button>`,
+        ...sortedShelfTags.map(([tag, count]) => {
+          const active = state.todaySelectedTag === tag;
+          return `<button type="button" class="tag-filter-pill${active ? ' is-active' : ''}" data-tag="${escapeHtml(tag)}" aria-pressed="${active ? 'true' : 'false'}"><span>${escapeHtml(tag)}</span><span class="difficulty-pill-count">${escapeHtml(String(count))}</span></button>`;
+        }),
+      ].join('');
+      setHidden(els.todayTagFilterBar, false);
+    }
+  }
+
+  const visibleUnplayedGames =
+    state.todaySelectedTag === 'All'
+      ? unplayedGames
+      : unplayedGames.filter((g) => getGameTags(g).includes(state.todaySelectedTag));
+  const visibleCompletedPairs =
+    state.todaySelectedTag === 'All'
+      ? completedPairs
+      : completedPairs.filter(({ game }) => getGameTags(game).includes(state.todaySelectedTag));
+
   // Shelf 1: Up Next
   if (els.countToPlay) {
-    els.countToPlay.textContent = String(unplayedGames.length);
+    els.countToPlay.textContent = String(visibleUnplayedGames.length);
   }
 
   if (els.toPlayGrid) {
@@ -1035,9 +1197,16 @@ function renderTodayView() {
           </div>
         </div>
       `;
+    } else if (visibleUnplayedGames.length === 0) {
+      els.toPlayGrid.innerHTML = `
+        <div class="empty-grid-card">
+          <p><strong>All ${escapeHtml(state.todaySelectedTag)} games cleared!</strong> — Switch back to All to see the remaining ${unplayedGames.length} unplayed ${unplayedGames.length === 1 ? 'game' : 'games'}.</p>
+          <button type="button" class="btn btn-secondary btn-sm" data-action="clear-today-tag">Show All Games</button>
+        </div>
+      `;
     } else {
-      els.toPlayGrid.innerHTML = unplayedGames.map((game) => renderUnplayedCard(game)).join('');
-      for (const game of unplayedGames) {
+      els.toPlayGrid.innerHTML = visibleUnplayedGames.map((game) => renderUnplayedCard(game)).join('');
+      for (const game of visibleUnplayedGames) {
         const sparkHost = els.toPlayGrid.querySelector(
           `[data-sparkline-game="${CSS.escape(String(game.id))}"]`
         );
@@ -1055,11 +1224,11 @@ function renderTodayView() {
 
   // Shelf 2: Cleared Today
   if (els.countCompleted) {
-    els.countCompleted.textContent = String(completedPairs.length);
+    els.countCompleted.textContent = String(visibleCompletedPairs.length);
   }
-  setHidden(els.completedSection, completedPairs.length === 0);
+  setHidden(els.completedSection, visibleCompletedPairs.length === 0);
   if (els.completedGrid) {
-    els.completedGrid.innerHTML = completedPairs
+    els.completedGrid.innerHTML = visibleCompletedPairs
       .map(({ game, entry }) => renderCompletedTicket(game, entry))
       .join('');
   }
@@ -1100,6 +1269,9 @@ function renderUnplayedCard(game) {
   const metaTags = [
     `<span class="game-category-tag">${escapeHtml(game.category || domain || 'Daily Game')}</span>`,
   ];
+  if (game.compete === false) {
+    metaTags.push('<span class="game-category-tag">Solo</span>');
+  }
 
   const recentPts = summary.recentSparkline || [];
   const numericPointsCount = recentPts.filter(
@@ -1388,17 +1560,26 @@ function renderCompletedTicket(game, entry) {
   const liveToday = isLiveTodayMode();
   const puzzleStatus = liveToday ? getLivePuzzleStatus(game) : null;
   const difficulty = getEntryDifficulty(entry);
+  const cluesAcc = safeIsCluesBySamGame(game) ? safeGetCluesBySamAccuracy(entry) : null;
   const showRoundChips = shouldShowRoundChips(
     entry.breakdown,
     entry.parserId || game.resolvedParser?.id || game.parserId
   );
 
   const ticketMetaTags = [];
+  if (game.compete === false) {
+    ticketMetaTags.push('<span class="pill pill-neutral">Solo</span>');
+  }
   if (entry.puzzleId) {
     ticketMetaTags.push(`<span class="game-category-tag tabular-nums">${escapeHtml(entry.puzzleId)}</span>`);
   }
   if (difficulty) {
     ticketMetaTags.push(renderDifficultyBadgeHtml(difficulty, { compact: true }));
+  }
+  if (cluesAcc?.accuracySummary) {
+    ticketMetaTags.push(
+      `<span class="pill ${cluesAcc.isPerfect ? 'pill-success' : 'pill-neutral'} tabular-nums">${escapeHtml(cluesAcc.accuracySummary)}</span>`
+    );
   }
 
   return `
@@ -1593,6 +1774,16 @@ function buildParsePreviewHtml(parsed, game, { emptyHint = 'Waiting for pasted r
 
   if (parsed.puzzleId) {
     badges.push(`<span class="pill pill-neutral tabular-nums">${escapeHtml(parsed.puzzleId)}</span>`);
+  }
+
+  const cluesAcc =
+    safeIsCluesBySamGame(game) || parsed.parserId === 'clues_by_sam'
+      ? safeGetCluesBySamAccuracy(parsed)
+      : null;
+  if (cluesAcc?.accuracySummary) {
+    badges.push(
+      `<span class="pill ${cluesAcc.isPerfect ? 'pill-success' : 'pill-neutral'} tabular-nums">${escapeHtml(cluesAcc.accuracySummary)}</span>`
+    );
   }
 
   const parsedDifficulty = getCanonicalDifficulty(parsed.metadata?.difficulty);
@@ -1931,12 +2122,14 @@ function handleInlineCapturePreview(gameId, rawText) {
       : parsed.solved === false
         ? '<span class="pill pill-danger">DNF</span>'
         : '';
+  const cluesAcc = safeIsCluesBySamGame(game) ? safeGetCluesBySamAccuracy(parsed) : null;
   const showRounds = shouldShowRoundChips(
     parsed.breakdown,
     parsed.parserId || game.resolvedParser?.id || game.parserId
   );
   preview.innerHTML = `
     <span class="pill pill-accent tabular-nums">${escapeHtml(displayStr)}</span>
+    ${cluesAcc?.accuracySummary ? `<span class="pill ${cluesAcc.isPerfect ? 'pill-success' : 'pill-neutral'} tabular-nums">${escapeHtml(cluesAcc.accuracySummary)}</span>` : ''}
     ${parsed.puzzleId ? `<span class="pill pill-neutral tabular-nums">${escapeHtml(parsed.puzzleId)}</span>` : ''}
     ${outcomePill}
     ${
@@ -2560,9 +2753,119 @@ function getUrlMatchKey(raw) {
   }
 }
 
+const CATALOG_COLLECTION_GROUPS = [
+  { key: 'community', title: "✨ Friends' Picks & Community Games", defaultOpen: true },
+  { key: 'magnitudle', title: '📏 Magnitudle Collection', defaultOpen: true },
+  { key: 'flightq', title: '✈️ FlightQ Daily Collection', defaultOpen: false },
+];
+
+function getNormalizedCollectionKey(item) {
+  const rawCol = String(item?.collection || '').trim().toLowerCase();
+  if (rawCol === 'magnitudle' || String(item?.slug || '').toLowerCase().startsWith('magnitudle-')) {
+    return 'magnitudle';
+  }
+  if (rawCol === 'flightq' || String(item?.slug || '').toLowerCase().startsWith('flightq-')) {
+    return 'flightq';
+  }
+  return null;
+}
+
+function isOptionalCollectionItem(item) {
+  if (item?.isStarter) return false;
+  if (item?.isOptional === true) return true;
+  if (item?.isOptional === false) return false;
+  return Boolean(getNormalizedCollectionKey(item));
+}
+
+function getCatalogCollectionKey(item) {
+  return getNormalizedCollectionKey(item) || 'community';
+}
+
+function getCatalogTagsWithCounts(items) {
+  const counts = new Map();
+  for (const item of items || []) {
+    for (const tag of getGameTags(item)) {
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  }
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return { counts, tags: sorted.map(([tag]) => tag) };
+}
+
+function renderCatalogTagBarHtml(items, selectedTag) {
+  const { counts, tags } = getCatalogTagsWithCounts(items);
+  if (tags.length === 0) return '';
+  const allActive = selectedTag === 'All';
+  const buttons = [
+    `<button type="button" class="tag-filter-pill ${allActive ? 'is-active' : ''}" data-tag="All" aria-pressed="${allActive ? 'true' : 'false'}">All <span class="tabular-nums">(${items.length})</span></button>`,
+  ];
+  for (const tag of tags) {
+    const active = selectedTag === tag;
+    buttons.push(
+      `<button type="button" class="tag-filter-pill ${active ? 'is-active' : ''}" data-tag="${escapeHtml(tag)}" aria-pressed="${active ? 'true' : 'false'}">${escapeHtml(tag)} <span class="tabular-nums">(${counts.get(tag)})</span></button>`
+    );
+  }
+  return buttons.join('');
+}
+
+function renderCatalogCollectionsHtml(items, { contextKey, forceOpen = false } = {}) {
+  const grouped = new Map();
+  for (const group of CATALOG_COLLECTION_GROUPS) {
+    grouped.set(group.key, []);
+  }
+  for (const item of items || []) {
+    const key = getCatalogCollectionKey(item);
+    grouped.get(key).push(item);
+  }
+
+  const sections = [];
+  for (const group of CATALOG_COLLECTION_GROUPS) {
+    const groupItems = grouped.get(group.key) || [];
+    if (groupItems.length === 0) continue;
+    const stateKey = `${contextKey}:${group.key}`;
+    const storedOpen = state.openCatalogCollections?.[stateKey];
+    const isOpen =
+      typeof storedOpen === 'boolean'
+        ? storedOpen || forceOpen
+        : forceOpen || group.defaultOpen;
+    sections.push(`
+      <details class="catalog-collection-group" data-collection-context="${escapeHtml(contextKey)}" data-collection-key="${escapeHtml(group.key)}" ${isOpen ? 'open' : ''}>
+        <summary class="catalog-collection-summary">
+          <span>${escapeHtml(group.title)}</span>
+          <span class="pill pill-neutral catalog-collection-count tabular-nums">${escapeHtml(String(groupItems.length))}</span>
+        </summary>
+        <div class="catalog-collection-items catalog-list">
+          ${groupItems.map((item) => renderCatalogItemHtml(item)).join('')}
+        </div>
+      </details>
+    `);
+  }
+  return sections.join('');
+}
+
+function matchesCatalogFilters(item, query, selectedTag) {
+  if (selectedTag && selectedTag !== 'All') {
+    const tags = getGameTags(item);
+    if (!tags.includes(selectedTag)) return false;
+  }
+  if (!query) return true;
+  return [
+    item.name,
+    item.slug,
+    item.category,
+    item.url,
+    item.createdByName,
+    ...getGameTags(item),
+  ]
+    .filter(Boolean)
+    .some((field) => String(field).toLowerCase().includes(query));
+}
+
 function updateCatalogDiscoveryBadge() {
   const discoverableCount = (state.catalog || []).filter(
-    (item) => item.viewerStatus === 'not_added'
+    (item) =>
+      item.viewerStatus === 'not_added' &&
+      (Number(item.playerCount || 0) > 0 || Boolean(item.createdByName))
   ).length;
   if (els.addGameCatalogBadge) {
     if (discoverableCount > 0) {
@@ -2616,27 +2919,41 @@ function renderCatalogItemHtml(item) {
   `;
 }
 
-function renderCatalogPicker(searchTerm = '') {
+function renderCatalogPicker(searchTerm = '', selectedTag = state.dialogCatalogTag) {
   if (!els.catalogAvailableList || !els.catalogOwnedList) return;
-  const query = String(searchTerm || '').trim().toLowerCase();
-  const matchesQuery = (item) => {
-    if (!query) return true;
-    return [item.name, item.slug, item.category, item.url, item.createdByName]
-      .filter(Boolean)
-      .some((field) => String(field).toLowerCase().includes(query));
-  };
+  const catalog = state.catalog || [];
+  const allAvailable = catalog.filter((item) => item.viewerStatus !== 'active');
+  const { tags: availableTags } = getCatalogTagsWithCounts(catalog);
+  if (selectedTag !== 'All' && !availableTags.includes(selectedTag)) {
+    state.dialogCatalogTag = 'All';
+    selectedTag = 'All';
+  } else {
+    state.dialogCatalogTag = selectedTag || 'All';
+  }
 
-  const filtered = (state.catalog || []).filter(matchesQuery);
+  if (els.catalogTagBar) {
+    const tagBarHtml = renderCatalogTagBarHtml(catalog, state.dialogCatalogTag);
+    els.catalogTagBar.innerHTML = tagBarHtml;
+    setHidden(els.catalogTagBar, !tagBarHtml);
+  }
+
+  const query = String(searchTerm || '').trim().toLowerCase();
+  const filtered = catalog.filter((item) =>
+    matchesCatalogFilters(item, query, state.dialogCatalogTag)
+  );
   const available = filtered.filter((item) => item.viewerStatus !== 'active');
   const owned = filtered.filter((item) => item.viewerStatus === 'active');
 
   if (available.length === 0) {
-    const hasAnyUnadded = (state.catalog || []).some((item) => item.viewerStatus !== 'active');
-    els.catalogAvailableList.innerHTML = hasAnyUnadded
-      ? '<p class="empty-hint">No matching catalog games — create a brand-new game below.</p>'
-      : `<p class="empty-hint">All ${owned.length} catalog games are already on your shelf!</p>`;
+    els.catalogAvailableList.innerHTML =
+      allAvailable.length > 0
+        ? '<p class="empty-hint">No matching catalog games — clear filters or create a brand-new game below.</p>'
+        : `<p class="empty-hint">All ${catalog.length} catalog games are already on your shelf!</p>`;
   } else {
-    els.catalogAvailableList.innerHTML = available.map((item) => renderCatalogItemHtml(item)).join('');
+    els.catalogAvailableList.innerHTML = renderCatalogCollectionsHtml(available, {
+      contextKey: 'dialog',
+      forceOpen: Boolean(query) || state.dialogCatalogTag !== 'All',
+    });
   }
 
   if (els.catalogOwnedSummary) {
@@ -2646,6 +2963,46 @@ function renderCatalogPicker(searchTerm = '') {
     setHidden(els.catalogOwnedDetails, owned.length === 0);
   }
   els.catalogOwnedList.innerHTML = owned.map((item) => renderCatalogItemHtml(item)).join('');
+}
+
+function renderFriendsCatalogShelf() {
+  if (!els.friendsCatalogShelf || !els.friendsCatalogCollections) return;
+  const discoverable = (state.catalog || []).filter((item) => item.viewerStatus !== 'active');
+  if (discoverable.length === 0) {
+    setHidden(els.friendsCatalogShelf, true);
+    els.friendsCatalogCollections.innerHTML = '';
+    if (els.friendsCatalogTagBar) els.friendsCatalogTagBar.innerHTML = '';
+    return;
+  }
+
+  setHidden(els.friendsCatalogShelf, false);
+  if (els.friendsCatalogCount) {
+    els.friendsCatalogCount.textContent = `${discoverable.length} available`;
+  }
+
+  const { tags } = getCatalogTagsWithCounts(discoverable);
+  if (state.friendsCatalogTag !== 'All' && !tags.includes(state.friendsCatalogTag)) {
+    state.friendsCatalogTag = 'All';
+  }
+  if (els.friendsCatalogTagBar) {
+    const tagBarHtml = renderCatalogTagBarHtml(discoverable, state.friendsCatalogTag);
+    els.friendsCatalogTagBar.innerHTML = tagBarHtml;
+    setHidden(els.friendsCatalogTagBar, !tagBarHtml);
+  }
+
+  const query = String(state.friendsCatalogSearch || '').trim().toLowerCase();
+  const filtered = discoverable.filter((item) =>
+    matchesCatalogFilters(item, query, state.friendsCatalogTag)
+  );
+  if (filtered.length === 0) {
+    els.friendsCatalogCollections.innerHTML =
+      '<p class="empty-hint">No catalog games match your search or tag filter.</p>';
+  } else {
+    els.friendsCatalogCollections.innerHTML = renderCatalogCollectionsHtml(filtered, {
+      contextKey: 'friends',
+      forceOpen: Boolean(query) || state.friendsCatalogTag !== 'All',
+    });
+  }
 }
 
 function renderCatalogMatchBanner() {
@@ -2715,7 +3072,7 @@ async function handleSubscribeCatalogGame(
     if (closeGameDialogOnSuccess && els.gameDialog?.open) {
       closeModalDialog(els.gameDialog, 'saved');
     } else if (els.gameDialog?.open && !els.gameFormId?.value) {
-      renderCatalogPicker(els.catalogSearchInput?.value || '');
+      renderCatalogPicker(els.catalogSearchInput?.value || '', state.dialogCatalogTag);
       renderCatalogMatchBanner();
     }
 
@@ -2761,9 +3118,10 @@ function openGameModal(gameId = null) {
   setHidden(els.catalogPickerSection, !isCreateMode);
   setHidden(els.createCustomDivider, !isCreateMode);
   if (isCreateMode) {
+    state.dialogCatalogTag = 'All';
     if (els.catalogSearchInput) els.catalogSearchInput.value = '';
     if (els.catalogOwnedDetails) els.catalogOwnedDetails.open = false;
-    renderCatalogPicker('');
+    renderCatalogPicker('', 'All');
   } else if (els.gameCatalogMatchBanner) {
     els.gameCatalogMatchBanner.innerHTML = '';
     setHidden(els.gameCatalogMatchBanner, true);
@@ -2946,6 +3304,10 @@ function renderMatrixCellHtml(cell) {
   const lockBadge = cell.spoilerProtected
     ? '<span class="matrix-spoiler-lock" title="Play today\'s puzzle to unlock share grid" aria-label="Spoiler protected">🔒</span>'
     : '';
+  const accHtml =
+    !cell.spoilerProtected && cell.accuracySummary
+      ? `<div class="cell-accuracy-line muted-text tabular-nums">${escapeHtml(cell.accuracySummary)}</div>`
+      : '';
   const gridHtml = cell.emojiGrid
     ? `<details class="share-grid-details matrix-grid-details"><summary>Grid</summary><pre class="share-grid-pre">${escapeHtml(cell.emojiGrid)}</pre></details>`
     : '';
@@ -2959,6 +3321,7 @@ function renderMatrixCellHtml(cell) {
         ${dnfBadge}
         ${lockBadge}
       </div>
+      ${accHtml}
       ${gridHtml}
     </td>
   `;
@@ -2975,6 +3338,10 @@ function renderGameTodayCellHtml(cell) {
   const lockBadge = cell.spoilerProtected
     ? '<span class="matrix-spoiler-lock" title="Play today\'s puzzle to unlock share grid" aria-label="Spoiler protected">🔒</span>'
     : '';
+  const accHtml =
+    !cell.spoilerProtected && cell.accuracySummary
+      ? `<div class="cell-accuracy-line muted-text tabular-nums">${escapeHtml(cell.accuracySummary)}</div>`
+      : '';
   const gridHtml = cell.emojiGrid
     ? `<details class="share-grid-details matrix-grid-details"><summary>Grid</summary><pre class="share-grid-pre">${escapeHtml(cell.emojiGrid)}</pre></details>`
     : '';
@@ -2986,6 +3353,7 @@ function renderGameTodayCellHtml(cell) {
       ${dnfBadge}
       ${lockBadge}
     </div>
+    ${accHtml}
     ${gridHtml}
   `;
 }
@@ -3124,8 +3492,56 @@ function computeMetricRankMap(standings, field, lowerIsBetter) {
   return rankMap;
 }
 
-function sortGamewiseStandings(standings, sortKey, sortDir, metricDirection) {
+function compareCluesRankItems(aPenalty, aVal, bPenalty, bVal) {
+  const aHasP = aPenalty !== null && aPenalty !== undefined && Number.isFinite(Number(aPenalty));
+  const bHasP = bPenalty !== null && bPenalty !== undefined && Number.isFinite(Number(bPenalty));
+  if (aHasP !== bHasP) return aHasP ? -1 : 1;
+  if (aHasP && bHasP && Number(aPenalty) !== Number(bPenalty)) {
+    return Number(aPenalty) - Number(bPenalty);
+  }
+  const aValid = aVal !== null && aVal !== undefined && Number.isFinite(Number(aVal));
+  const bValid = bVal !== null && bVal !== undefined && Number.isFinite(Number(bVal));
+  if (!aValid && !bValid) return 0;
+  if (!aValid) return 1;
+  if (!bValid) return -1;
+  return Number(aVal) - Number(bVal);
+}
+
+function computeCluesMetricRankMap(standings, { penaltyField, valueField }) {
+  const rankMap = new Map();
+  const hasFinite = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
+  const validRows = standings
+    .filter((p) => hasFinite(p[penaltyField]) || hasFinite(p[valueField]))
+    .sort((a, b) =>
+      compareCluesRankItems(a[penaltyField], a[valueField], b[penaltyField], b[valueField])
+    );
+
+  let prevRow = null;
+  let prevRank = 0;
+  validRows.forEach((p, idx) => {
+    const isTie =
+      prevRow !== null &&
+      compareCluesRankItems(
+        prevRow[penaltyField],
+        prevRow[valueField],
+        p[penaltyField],
+        p[valueField]
+      ) === 0;
+    const rank = isTie ? prevRank : idx + 1;
+    prevRow = p;
+    prevRank = rank;
+    rankMap.set(p.userId, rank);
+  });
+  return rankMap;
+}
+
+function sortGamewiseStandings(standings, sortKey, sortDir, gameOrDirection) {
   const rows = Array.isArray(standings) ? [...standings] : [];
+  const selectedGame =
+    gameOrDirection && typeof gameOrDirection === 'object' ? gameOrDirection : null;
+  const metricDirection =
+    typeof gameOrDirection === 'string' ? gameOrDirection : selectedGame?.metricDirection;
+  const isClues = safeIsCluesBySamGame(selectedGame);
   const lowerIsBetter = metricDirection === 'lower_is_better';
   const dirMult = sortDir === 'asc' ? 1 : -1;
 
@@ -3133,8 +3549,26 @@ function sortGamewiseStandings(standings, sortKey, sortDir, metricDirection) {
     return rows.map((p) => ({ player: p, displayRank: p.rank }));
   }
 
-  const avgRankMap = sortKey === 'average' ? computeMetricRankMap(rows, 'averageValue', lowerIsBetter) : null;
-  const pbRankMap = sortKey === 'best' ? computeMetricRankMap(rows, 'personalBestValue', lowerIsBetter) : null;
+  const avgRankMap =
+    sortKey === 'average'
+      ? isClues
+        ? computeCluesMetricRankMap(rows, {
+            penaltyField: 'averagePenalty',
+            valueField: 'averageValue',
+          })
+        : computeMetricRankMap(rows, 'averageValue', lowerIsBetter)
+      : null;
+  const pbRankMap =
+    sortKey === 'best'
+      ? isClues
+        ? computeCluesMetricRankMap(rows, {
+            penaltyField: 'personalBestPenalty',
+            valueField: 'personalBestValue',
+          })
+        : computeMetricRankMap(rows, 'personalBestValue', lowerIsBetter)
+      : null;
+
+  const hasFinite = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
 
   rows.sort((a, b) => {
     let cmp = 0;
@@ -3149,27 +3583,67 @@ function sortGamewiseStandings(standings, sortKey, sortDir, metricDirection) {
       if (a.today && !b.today) return -1;
       if (!a.today && b.today) return 1;
       if (a.today && b.today) {
-        const aNum =
-          a.today.solved !== false &&
-          a.today.primaryValue !== null &&
-          Number.isFinite(Number(a.today.primaryValue))
-            ? Number(a.today.primaryValue)
-            : null;
-        const bNum =
-          b.today.solved !== false &&
-          b.today.primaryValue !== null &&
-          Number.isFinite(Number(b.today.primaryValue))
-            ? Number(b.today.primaryValue)
-            : null;
-        cmp = compareNullableWithDir(aNum, bNum, sortDir);
+        const aSolved = a.today.solved !== false;
+        const bSolved = b.today.solved !== false;
+        if (isClues) {
+          if (aSolved !== bSolved) return aSolved ? -1 : 1;
+          if (aSolved && bSolved) {
+            const aAcc = a.today.accuracyPenalty;
+            const bAcc = b.today.accuracyPenalty;
+            const aNum = hasFinite(a.today.primaryValue) ? Number(a.today.primaryValue) : null;
+            const bNum = hasFinite(b.today.primaryValue) ? Number(b.today.primaryValue) : null;
+            const aValid = hasFinite(aAcc) || aNum !== null;
+            const bValid = hasFinite(bAcc) || bNum !== null;
+            if (aValid !== bValid) return aValid ? -1 : 1;
+            if (aValid && bValid) {
+              cmp = compareCluesRankItems(aAcc, aNum, bAcc, bNum) * dirMult;
+            }
+          }
+        } else {
+          const aNum =
+            aSolved && hasFinite(a.today.primaryValue) ? Number(a.today.primaryValue) : null;
+          const bNum =
+            bSolved && hasFinite(b.today.primaryValue) ? Number(b.today.primaryValue) : null;
+          cmp = compareNullableWithDir(aNum, bNum, sortDir);
+        }
         if (cmp === 0 && (b.today.points ?? 0) !== (a.today.points ?? 0)) {
           cmp = (b.today.points ?? 0) - (a.today.points ?? 0);
         }
       }
     } else if (sortKey === 'average') {
-      cmp = compareNullableWithDir(a.averageValue, b.averageValue, sortDir);
+      if (isClues) {
+        const aValid = hasFinite(a.averagePenalty) || hasFinite(a.averageValue);
+        const bValid = hasFinite(b.averagePenalty) || hasFinite(b.averageValue);
+        if (aValid !== bValid) return aValid ? -1 : 1;
+        if (aValid && bValid) {
+          cmp =
+            compareCluesRankItems(
+              a.averagePenalty,
+              a.averageValue,
+              b.averagePenalty,
+              b.averageValue
+            ) * dirMult;
+        }
+      } else {
+        cmp = compareNullableWithDir(a.averageValue, b.averageValue, sortDir);
+      }
     } else if (sortKey === 'best') {
-      cmp = compareNullableWithDir(a.personalBestValue, b.personalBestValue, sortDir);
+      if (isClues) {
+        const aValid = hasFinite(a.personalBestPenalty) || hasFinite(a.personalBestValue);
+        const bValid = hasFinite(b.personalBestPenalty) || hasFinite(b.personalBestValue);
+        if (aValid !== bValid) return aValid ? -1 : 1;
+        if (aValid && bValid) {
+          cmp =
+            compareCluesRankItems(
+              a.personalBestPenalty,
+              a.personalBestValue,
+              b.personalBestPenalty,
+              b.personalBestValue
+            ) * dirMult;
+        }
+      } else {
+        cmp = compareNullableWithDir(a.personalBestValue, b.personalBestValue, sortDir);
+      }
     } else if (sortKey === 'streak') {
       cmp = ((a.currentStreak ?? 0) - (b.currentStreak ?? 0)) * dirMult;
     } else if (sortKey === 'played') {
@@ -3287,6 +3761,11 @@ function renderTodayMatrix(resp) {
         .join('')}
     </tr>
   `;
+
+  if (games.length === 0) {
+    els.playersMatrixTbody.innerHTML = `<tr><td colspan="2" class="muted-text">No competitive games selected yet — solo games stay on your Today shelf. <button type="button" class="btn btn-secondary btn-xs" data-action="go-manage-games">Choose Competing Games in My Games</button></td></tr>`;
+    return;
+  }
 
   if (rows.length === 0) {
     els.playersMatrixTbody.innerHTML = `<tr><td colspan="${Math.max(2, games.length + 2)}" class="muted-text">No players found yet.</td></tr>`;
@@ -3468,7 +3947,12 @@ function renderGamewiseLeaderboard(resp) {
 
   if (els.lbGameHeader) {
     if (!selectedGame) {
-      els.lbGameHeader.innerHTML = '<p class="muted-text">No games available yet.</p>';
+      els.lbGameHeader.innerHTML = `
+        <div class="lb-empty-scope">
+          <p class="muted-text">No competitive games selected for Leaderboard.</p>
+          <button type="button" class="btn btn-primary btn-xs" data-action="go-manage-games">Choose Competing Games in My Games</button>
+        </div>
+      `;
     } else {
       const color = normalizeHexColor(selectedGame.color);
       const onColor = getReadableTextColor(color);
@@ -3538,16 +4022,21 @@ function renderGamewiseLeaderboard(resp) {
     return;
   }
 
+  const isCluesSelected = safeIsCluesBySamGame(selectedGame);
   const sortedRows = sortGamewiseStandings(
     rawStandings,
     state.lbGameSortKey,
     state.lbGameSortDir,
-    selectedGame?.metricDirection
+    selectedGame
   );
 
   els.playersGameTbody.innerHTML = sortedRows
     .map(({ player, displayRank }) => {
       const streak = player.currentStreak || 0;
+      const pbAccHtml =
+        isCluesSelected && player.personalBestAccuracySummary
+          ? `<div class="cell-accuracy-line muted-text tabular-nums">${escapeHtml(player.personalBestAccuracySummary)}</div>`
+          : '';
       return `
         <tr class="${player.isViewer ? 'leaderboard-row-you' : ''}">
           <td class="rank-cell">${escapeHtml(formatRankDisplay(displayRank))}</td>
@@ -3555,7 +4044,12 @@ function renderGamewiseLeaderboard(resp) {
           <td class="num-col tabular-nums"><strong>${escapeHtml(String(player.gamePoints ?? 0))} pts</strong></td>
           <td>${renderGameTodayCellHtml(player.today || null)}</td>
           <td class="num-col tabular-nums">${escapeHtml(player.averageDisplay || '—')}</td>
-          <td class="num-col tabular-nums"><strong>${escapeHtml(player.personalBestDisplay || '—')}</strong></td>
+          <td class="num-col tabular-nums">
+            <div class="today-cell-stack">
+              <strong>${escapeHtml(player.personalBestDisplay || '—')}</strong>
+              ${pbAccHtml}
+            </div>
+          </td>
           <td class="num-col tabular-nums">${streak > 0 ? `🔥 ${escapeHtml(String(streak))}d` : '—'}</td>
           <td class="num-col tabular-nums">${escapeHtml(String(player.totalPlayed ?? 0))}</td>
         </tr>
@@ -3568,6 +4062,15 @@ function renderLeaderboardView() {
   renderLeaderboardControls();
   const resp = state.leaderboardResponse;
   if (!resp) return;
+
+  if (els.lbCompetingScopeChip) {
+    const competingCount = resp.competingGamesCount ?? (resp.catalogGames || []).length;
+    els.lbCompetingScopeChip.innerHTML = `
+      <span>🏆 Competing in <strong class="tabular-nums">${escapeHtml(String(competingCount))}</strong> ${competingCount === 1 ? 'game' : 'games'}</span>
+      <button type="button" class="btn btn-ghost btn-xs" data-action="go-manage-games">Change in My Games</button>
+    `;
+    setHidden(els.lbCompetingScopeChip, false);
+  }
 
   if (els.overallStandingsTitle) {
     els.overallStandingsTitle.textContent =
@@ -4020,6 +4523,10 @@ function renderStatsGameDetail() {
 
   const kpis = gameStats?.kpis || {};
   const pbDisplay = kpis.personalBest?.displayValue || '—';
+  const pbSub =
+    safeIsCluesBySamGame(game) && kpis.personalBest?.accuracySummary
+      ? [kpis.personalBest.accuracySummary, kpis.personalBest.playDate].filter(Boolean).join(' · ')
+      : kpis.personalBest?.playDate || 'No numeric score yet';
   const kpiCards = [
     { label: 'Total Plays', val: String(kpis.totalPlayed ?? 0), sub: 'Completed in window' },
     {
@@ -4034,7 +4541,7 @@ function renderStatsGameDetail() {
     {
       label: `Best ${game.metricLabel || 'Score'}`,
       val: pbDisplay,
-      sub: kpis.personalBest?.playDate || 'No numeric score yet',
+      sub: pbSub,
     },
   ];
 
@@ -4124,6 +4631,10 @@ function renderStatsGameDetail() {
           const diffBadgeHtml = difficulty
             ? renderDifficultyBadgeHtml(difficulty, { compact: true })
             : '';
+          const cluesAcc = safeIsCluesBySamGame(game) ? safeGetCluesBySamAccuracy(entry) : null;
+          const accBadgeHtml = cluesAcc?.accuracySummary
+            ? `<span class="pill ${cluesAcc.isPerfect ? 'pill-success' : 'pill-neutral'} tabular-nums">${escapeHtml(cluesAcc.accuracySummary)}</span>`
+            : '';
           const showRoundChips = shouldShowRoundChips(
             entry.breakdown,
             entry.parserId || game.resolvedParser?.id || game.parserId
@@ -4139,6 +4650,7 @@ function renderStatsGameDetail() {
                 <div class="history-status-cell">
                   <span class="pill ${status.pillClass}">${escapeHtml(status.label)}</span>
                   ${diffBadgeHtml}
+                  ${accBadgeHtml}
                 </div>
               </td>
               <td>
@@ -4187,6 +4699,25 @@ async function handleReparseGame() {
 function renderGamesAdminView() {
   populateGameSelects();
 
+  if (els.rosterCompeteBar) {
+    const activeGames = state.games.filter((g) => !g.archived);
+    const activeCount = activeGames.length;
+    const competingCount = activeGames.filter((g) => g.compete !== false).length;
+    if (activeCount === 0) {
+      els.rosterCompeteBar.innerHTML = '';
+      setHidden(els.rosterCompeteBar, true);
+    } else {
+      els.rosterCompeteBar.innerHTML = `
+        <span class="roster-compete-summary tabular-nums">🏆 Competing in <strong>${escapeHtml(String(competingCount))}</strong> of <strong>${escapeHtml(String(activeCount))}</strong> active ${activeCount === 1 ? 'game' : 'games'}</span>
+        <div class="roster-compete-actions">
+          <button type="button" class="btn btn-secondary btn-xs" data-action="compete-all-games" ${competingCount === activeCount ? 'disabled' : ''}>Compete All</button>
+          <button type="button" class="btn btn-ghost btn-xs" data-action="solo-all-games" ${competingCount === 0 ? 'disabled' : ''}>Solo All</button>
+        </div>
+      `;
+      setHidden(els.rosterCompeteBar, false);
+    }
+  }
+
   if (els.manageGamesList) {
     if (state.games.length === 0) {
       els.manageGamesList.innerHTML = `<div class="empty-grid-card"><p class="muted-text">No games yet. Click "+ Add Game" to build your roster.</p></div>`;
@@ -4199,6 +4730,7 @@ function renderGamesAdminView() {
           const domain = getGameDomainLabel(game.url) || game.url;
           const parserMeta = getParserMeta(game.resolvedParser?.id || game.parserId);
           const resetSummary = getResetScheduleSummary(game);
+          const isCompeting = game.compete !== false;
           return `
             <div class="manage-game-item${game.archived ? ' is-archived' : ''}" data-game-id="${escapeHtml(game.id)}">
               <div class="manage-game-left">
@@ -4210,6 +4742,7 @@ function renderGamesAdminView() {
                     <span class="muted-text tabular-nums">${escapeHtml(game.metricLabel || 'Score')} · ${playsCount} plays · ${escapeHtml(domain)}</span>
                     <span class="pill pill-neutral">${escapeHtml(parserMeta.name || game.parserId || 'Generic')}</span>
                     <span class="pill pill-neutral tabular-nums">🕒 ${escapeHtml(resetSummary)}</span>
+                    ${!game.archived && !isCompeting ? '<span class="pill pill-neutral">Solo only</span>' : ''}
                     ${game.archived ? '<span class="pill pill-warning">Archived</span>' : ''}
                   </div>
                 </div>
@@ -4217,6 +4750,15 @@ function renderGamesAdminView() {
               <div class="manage-game-actions">
                 <button type="button" class="btn btn-secondary btn-xs" data-action="move-game-up" data-game-id="${escapeHtml(game.id)}" ${idx === 0 ? 'disabled' : ''} aria-label="Move ${escapeHtml(game.name)} up">↑</button>
                 <button type="button" class="btn btn-secondary btn-xs" data-action="move-game-down" data-game-id="${escapeHtml(game.id)}" ${idx === state.games.length - 1 ? 'disabled' : ''} aria-label="Move ${escapeHtml(game.name)} down">↓</button>
+                <button
+                  type="button"
+                  class="btn btn-xs compete-toggle-btn ${isCompeting ? 'is-competing' : 'is-solo'}"
+                  data-action="toggle-compete-game"
+                  data-game-id="${escapeHtml(game.id)}"
+                  aria-pressed="${isCompeting ? 'true' : 'false'}"
+                  aria-label="${escapeHtml(game.name)} leaderboard competition"
+                  ${game.archived ? 'disabled' : ''}
+                >${isCompeting ? '🏆 Competing' : 'Solo only'}</button>
                 <button type="button" class="btn btn-secondary btn-xs" data-action="edit-game" data-game-id="${escapeHtml(game.id)}">Edit</button>
                 <button type="button" class="btn btn-ghost btn-xs" data-action="toggle-archive-game" data-game-id="${escapeHtml(game.id)}">${game.archived ? 'Restore' : 'Archive'}</button>
                 <button type="button" class="btn btn-danger-ghost btn-xs" data-action="delete-game" data-game-id="${escapeHtml(game.id)}">Delete</button>
@@ -4228,29 +4770,65 @@ function renderGamesAdminView() {
     }
   }
 
-  if (els.friendsCatalogShelf) {
-    const discoverable = (state.catalog || []).filter((c) => c.viewerStatus === 'not_added');
-    if (discoverable.length === 0) {
-      els.friendsCatalogShelf.innerHTML = '';
-      setHidden(els.friendsCatalogShelf, true);
-    } else {
-      els.friendsCatalogShelf.innerHTML = `
-        <div class="friends-catalog-head">
-          <div>
-            <h3 class="section-title-sm">✨ Friends' Games in Hub Catalog</h3>
-            <p class="section-subtitle">One-click add games your friends created so your scores compete together</p>
-          </div>
-          <span class="count-badge">${discoverable.length}</span>
-        </div>
-        <div class="catalog-list">
-          ${discoverable.map((item) => renderCatalogItemHtml(item)).join('')}
-        </div>
-      `;
-      setHidden(els.friendsCatalogShelf, false);
+  renderFriendsCatalogShelf();
+  renderParserWorkbench();
+}
+
+async function handleToggleCompeteGame(gameId, triggerBtn = null) {
+  const game = getGameById(gameId);
+  if (!game || game.archived) return;
+  const nextCompete = game.compete === false;
+  if (triggerBtn) triggerBtn.disabled = true;
+  try {
+    await api.updateGame(game.id, { compete: nextCompete });
+    invalidateLeaderboardCache();
+    await refreshBootstrapAndEntries();
+    renderGamesAdminView();
+    renderTodayView();
+    if (state.activeTab === 'leaderboard') {
+      await loadAndRenderLeaderboardView();
+    }
+    showToast(
+      nextCompete
+        ? `${game.name} is now competing on the Leaderboard.`
+        : `${game.name} switched to Solo (kept on Today shelf).`,
+      { variant: 'success' }
+    );
+  } catch (err) {
+    showToast(`Failed to update competition setting: ${err.message}`, { variant: 'error' });
+  } finally {
+    if (triggerBtn && triggerBtn.isConnected) {
+      triggerBtn.disabled = false;
     }
   }
+}
 
-  renderParserWorkbench();
+async function handleBulkCompeteGames(targetCompete) {
+  const targets = state.games.filter(
+    (g) => !g.archived && (g.compete !== false) !== Boolean(targetCompete)
+  );
+  if (targets.length === 0) return;
+
+  try {
+    await Promise.all(
+      targets.map((g) => api.updateGame(g.id, { compete: Boolean(targetCompete) }))
+    );
+    invalidateLeaderboardCache();
+    await refreshBootstrapAndEntries();
+    renderGamesAdminView();
+    renderTodayView();
+    if (state.activeTab === 'leaderboard') {
+      await loadAndRenderLeaderboardView();
+    }
+    showToast(
+      targetCompete
+        ? 'All active games are now competing on the Leaderboard.'
+        : 'All active games switched to Solo mode.',
+      { variant: 'success' }
+    );
+  } catch (err) {
+    showToast(`Failed to update games: ${err.message}`, { variant: 'error' });
+  }
 }
 
 async function handleReorderGame(gameId, delta) {
@@ -4467,11 +5045,110 @@ async function handleImportJson() {
   }
 }
 
+function getSignupCatalogItems() {
+  if (Array.isArray(state.signupCatalog) && state.signupCatalog.length > 0) {
+    return state.signupCatalog;
+  }
+  return [
+    ...STARTER_GAMES.map((g) => ({ ...enrichGameMetadata(g), isFriendAdded: false, playerCount: 0 })),
+    ...OPTIONAL_CATALOG_GAMES.map((g) => ({
+      ...enrichGameMetadata(g),
+      isFriendAdded: false,
+      playerCount: 0,
+    })),
+  ];
+}
+
+function syncSignupPickerCounts(catalog = getSignupCatalogItems()) {
+  const selected = state.signupSelectedSlugs;
+  if (els.signupSelectedCount) {
+    els.signupSelectedCount.textContent = `${selected.size} selected`;
+  }
+  const optionalItems = catalog.filter((g) => isOptionalCollectionItem(g));
+  const optionalSelectedCount = optionalItems.filter((g) => selected.has(g.slug)).length;
+  if (els.signupOptionalCount) {
+    els.signupOptionalCount.textContent =
+      optionalSelectedCount > 0
+        ? `${optionalSelectedCount} selected · ${optionalItems.length} games`
+        : `${optionalItems.length} games`;
+  }
+  els.signupGamesFieldset?.querySelectorAll('input[name="competingSlugs"]').forEach((input) => {
+    const isChecked = selected.has(input.value);
+    input.checked = isChecked;
+    input.closest('.signup-game-chip')?.classList.toggle('is-checked', isChecked);
+  });
+}
+
+function renderSignupGameChipHtml(item) {
+  const checked = state.signupSelectedSlugs.has(item.slug);
+  const isFriendPick =
+    Boolean(item.isFriendAdded) || (!item.isStarter && !isOptionalCollectionItem(item));
+  return `
+    <label class="signup-game-chip${checked ? ' is-checked' : ''}">
+      <input type="checkbox" name="competingSlugs" value="${escapeHtml(item.slug)}" ${checked ? 'checked' : ''} />
+      <span class="signup-game-chip-icon" aria-hidden="true">${escapeHtml(item.icon || '🎮')}</span>
+      <span class="signup-game-chip-name">${escapeHtml(item.name)}</span>
+      ${isFriendPick ? '<span class="pill pill-accent signup-friend-badge">Friend\'s pick</span>' : ''}
+    </label>
+  `;
+}
+
+function renderSignupGamePicker() {
+  if (!els.signupFeaturedGames || !els.signupOptionalBody) return;
+  const catalog = getSignupCatalogItems();
+  if (!state.signupPickerInitialized) {
+    state.signupSelectedSlugs.clear();
+    for (const item of catalog) {
+      if (item.isStarter || !isOptionalCollectionItem(item) || item.isFriendAdded) {
+        state.signupSelectedSlugs.add(item.slug);
+      }
+    }
+    state.signupPickerInitialized = true;
+  }
+
+  const featured = catalog.filter((g) => !isOptionalCollectionItem(g));
+  const magnitudleItems = catalog.filter(
+    (g) => isOptionalCollectionItem(g) && getNormalizedCollectionKey(g) === 'magnitudle'
+  );
+  const flightqItems = catalog.filter(
+    (g) => isOptionalCollectionItem(g) && getNormalizedCollectionKey(g) === 'flightq'
+  );
+
+  els.signupFeaturedGames.innerHTML = featured.map(renderSignupGameChipHtml).join('');
+
+  const collections = [
+    { key: 'magnitudle', label: '📏 Magnitudle', items: magnitudleItems },
+    { key: 'flightq', label: '✈️ FlightQ Daily', items: flightqItems },
+  ].filter((c) => c.items.length > 0);
+
+  if (els.signupOptionalCollections) {
+    setHidden(els.signupOptionalCollections, collections.length === 0);
+  }
+  els.signupOptionalBody.innerHTML = collections
+    .map(
+      (col) => `
+      <div class="signup-optional-collection" data-signup-collection="${escapeHtml(col.key)}">
+        <div class="signup-optional-col-head">
+          <span class="signup-optional-col-title">${escapeHtml(col.label)} (${escapeHtml(String(col.items.length))})</span>
+          <button type="button" class="btn btn-ghost btn-xs" data-action="signup-select-collection" data-collection="${escapeHtml(col.key)}">Select All</button>
+        </div>
+        <div class="signup-games-grid">
+          ${col.items.map(renderSignupGameChipHtml).join('')}
+        </div>
+      </div>
+    `
+    )
+    .join('');
+
+  syncSignupPickerCounts(catalog);
+}
+
 function setAuthMode(mode) {
   const next = mode === 'signup' ? 'signup' : 'signin';
   state.authMode = next;
 
   const isSignUp = next === 'signup';
+  els.authScreen?.classList.toggle('is-signup-mode', isSignUp);
   if (els.btnAuthModeSignin) {
     els.btnAuthModeSignin.classList.toggle('is-active', !isSignUp);
     els.btnAuthModeSignin.setAttribute('aria-pressed', !isSignUp ? 'true' : 'false');
@@ -4485,6 +5162,9 @@ function setAuthMode(mode) {
   setHidden(els.signupForm, !isSignUp);
   setHidden(els.signinError, true);
   setHidden(els.signupError, true);
+  if (isSignUp) {
+    renderSignupGamePicker();
+  }
 }
 
 function resetPasswordToggleButtons() {
@@ -4566,6 +5246,13 @@ function enterUnauthenticatedState() {
   state.justStampedGameId = null;
   state.selectedStatsGameId = null;
   state.statsDifficulty = 'all';
+  state.todaySelectedTag = 'All';
+  state.dialogCatalogTag = 'All';
+  state.friendsCatalogTag = 'All';
+  state.friendsCatalogSearch = '';
+  state.openCatalogCollections = {};
+  state.signupSelectedSlugs.clear();
+  state.signupPickerInitialized = false;
   state.selectedHeatmapDate = null;
   state.pendingImportData = null;
   state.trackedResetEpochs = new Map();
@@ -4587,13 +5274,22 @@ function enterUnauthenticatedState() {
 
   if (els.toPlayGrid) els.toPlayGrid.innerHTML = '';
   if (els.completedGrid) els.completedGrid.innerHTML = '';
+  if (els.todayTagFilterBar) {
+    els.todayTagFilterBar.innerHTML = '';
+    setHidden(els.todayTagFilterBar, true);
+  }
+  if (els.rosterCompeteBar) {
+    els.rosterCompeteBar.innerHTML = '';
+    setHidden(els.rosterCompeteBar, true);
+  }
   if (els.leaderboardTbody) els.leaderboardTbody.innerHTML = '';
   if (els.historyTbody) els.historyTbody.innerHTML = '';
   if (els.manageGamesList) els.manageGamesList.innerHTML = '';
-  if (els.friendsCatalogShelf) {
-    els.friendsCatalogShelf.innerHTML = '';
-    setHidden(els.friendsCatalogShelf, true);
-  }
+  if (els.friendsCatalogSearch) els.friendsCatalogSearch.value = '';
+  if (els.friendsCatalogTagBar) els.friendsCatalogTagBar.innerHTML = '';
+  if (els.friendsCatalogCollections) els.friendsCatalogCollections.innerHTML = '';
+  if (els.friendsCatalogShelf) setHidden(els.friendsCatalogShelf, true);
+  if (els.signupOptionalCollections) els.signupOptionalCollections.open = false;
   updateCatalogDiscoveryBadge();
   if (els.playersOverallTbody) els.playersOverallTbody.innerHTML = '';
   renderTableSortHeaders(els.playersOverallTable, state.lbOverallSortKey, state.lbOverallSortDir);
@@ -4628,6 +5324,8 @@ function enterUnauthenticatedState() {
 }
 
 function applyAuthBootstrapHints(meResp = null) {
+  state.signupCatalog = Array.isArray(meResp?.signupCatalog) ? meResp.signupCatalog : null;
+  state.signupPickerInitialized = false;
   const gamesCount = Number(meResp?.unclaimed?.gamesCount || 0);
   const entriesCount = Number(meResp?.unclaimed?.entriesCount || 0);
   const hasUnclaimed = gamesCount > 0 || entriesCount > 0;
@@ -4650,6 +5348,8 @@ function applyAuthBootstrapHints(meResp = null) {
       setHidden(els.authClaimNotice, true);
     }
   }
+
+  renderSignupGamePicker();
 
   if (meResp?.hasUsers === false || hasUnclaimed) {
     setAuthMode('signup');
@@ -4763,6 +5463,21 @@ async function handleSignUpSubmit(event) {
     return;
   }
 
+  const competingSlugs = [
+    ...(els.signupForm?.querySelectorAll('input[name="competingSlugs"]:checked') || []),
+  ]
+    .map((el) => el.value)
+    .filter(Boolean);
+  if (competingSlugs.length === 0) {
+    if (els.signupError) {
+      els.signupError.textContent =
+        'Please select at least one game to compete in (or click Select All).';
+      setHidden(els.signupError, false);
+    }
+    els.btnSignupSelectAll?.focus();
+    return;
+  }
+
   state.isSubmittingAuth = true;
   if (els.btnSignupSubmit) {
     els.btnSignupSubmit.disabled = true;
@@ -4770,10 +5485,12 @@ async function handleSignUpSubmit(event) {
   }
 
   try {
-    const resp = await api.register({ name, email, password });
+    const resp = await api.register({ name, email, password, competingSlugs });
     if (!resp?.authenticated || !resp?.user) {
       throw new Error('Could not create account.');
     }
+    state.signupSelectedSlugs.clear();
+    state.signupPickerInitialized = false;
     await enterAuthenticatedApp(resp.user);
     showToast(`Account created! Welcome, ${resp.user.displayName || name}!`, {
       variant: 'success',
@@ -4813,6 +5530,42 @@ function bindEvents() {
   els.btnAuthModeSignup?.addEventListener('click', () => setAuthMode('signup'));
   els.signinForm?.addEventListener('submit', handleSignInSubmit);
   els.signupForm?.addEventListener('submit', handleSignUpSubmit);
+  els.btnSignupSelectAll?.addEventListener('click', () => {
+    const catalog = getSignupCatalogItems();
+    for (const g of catalog) {
+      if (!isOptionalCollectionItem(g)) {
+        state.signupSelectedSlugs.add(g.slug);
+      }
+    }
+    state.signupPickerInitialized = true;
+    syncSignupPickerCounts(catalog);
+  });
+  els.btnSignupClearAll?.addEventListener('click', () => {
+    state.signupSelectedSlugs.clear();
+    state.signupPickerInitialized = true;
+    syncSignupPickerCounts();
+  });
+  els.signupOptionalBody?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-action="signup-select-collection"][data-collection]');
+    if (!btn) return;
+    const colKey = String(btn.dataset.collection || '').toLowerCase();
+    const catalog = getSignupCatalogItems();
+    for (const item of catalog) {
+      if (isOptionalCollectionItem(item) && getNormalizedCollectionKey(item) === colKey) {
+        state.signupSelectedSlugs.add(item.slug);
+      }
+    }
+    state.signupPickerInitialized = true;
+    syncSignupPickerCounts(catalog);
+  });
+  els.signupGamesFieldset?.addEventListener('change', (event) => {
+    const input = event.target.closest('input[name="competingSlugs"]');
+    if (!input) return;
+    state.signupPickerInitialized = true;
+    if (input.checked) state.signupSelectedSlugs.add(input.value);
+    else state.signupSelectedSlugs.delete(input.value);
+    syncSignupPickerCounts();
+  });
   for (const btn of els.passwordToggleButtons || []) {
     btn.addEventListener('click', () => togglePasswordVisibility(btn));
   }
@@ -5025,7 +5778,19 @@ function bindEvents() {
       } catch (err) {
         showToast(`Could not save: ${err.message}`, { variant: 'error' });
       }
+    } else if (action === 'clear-today-tag') {
+      state.todaySelectedTag = 'All';
+      renderTodayView();
     }
+  });
+
+  els.todayTagFilterBar?.addEventListener('click', (event) => {
+    const btn = event.target.closest('.tag-filter-pill[data-tag]');
+    if (!btn) return;
+    const nextTag = btn.dataset.tag || 'All';
+    if (state.todaySelectedTag === nextTag) return;
+    state.todaySelectedTag = nextTag;
+    renderTodayView();
   });
 
   els.toPlayGrid?.addEventListener('input', (event) => {
@@ -5054,6 +5819,11 @@ function bindEvents() {
   els.btnLbToday?.addEventListener('click', () => handleLeaderboardDateChange(getLocalDateString()));
   els.lbDateInput?.addEventListener('change', (e) => handleLeaderboardDateChange(e.target.value));
   els.btnLbRefresh?.addEventListener('click', () => loadAndRenderLeaderboardView({ forceRefresh: true }));
+  els.lbCompetingScopeChip?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-action="go-manage-games"]');
+    if (!btn) return;
+    setActiveTab('games');
+  });
 
   els.lbWindowGroup?.addEventListener('click', (event) => {
     const btn = event.target.closest('.seg-btn[data-days]');
@@ -5071,12 +5841,22 @@ function bindEvents() {
   });
 
   els.playersMatrixTbody?.addEventListener('click', (event) => {
+    const manageBtn = event.target.closest('[data-action="go-manage-games"]');
+    if (manageBtn) {
+      setActiveTab('games');
+      return;
+    }
     const btn = event.target.closest('[data-action="subscribe-catalog-game"][data-slug]');
     if (!btn) return;
     handleSubscribeCatalogGame(btn.dataset.slug, btn);
   });
 
   els.lbGameHeader?.addEventListener('click', (event) => {
+    const manageBtn = event.target.closest('[data-action="go-manage-games"]');
+    if (manageBtn) {
+      setActiveTab('games');
+      return;
+    }
     const btn = event.target.closest('[data-action="subscribe-catalog-game"][data-slug]');
     if (!btn) return;
     handleSubscribeCatalogGame(btn.dataset.slug, btn);
@@ -5228,6 +6008,16 @@ function bindEvents() {
   });
 
   // My Games & Parser Lab events
+  els.rosterCompeteBar?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-action]');
+    if (!btn) return;
+    if (btn.dataset.action === 'compete-all-games') {
+      handleBulkCompeteGames(true);
+    } else if (btn.dataset.action === 'solo-all-games') {
+      handleBulkCompeteGames(false);
+    }
+  });
+
   els.manageGamesList?.addEventListener('click', (event) => {
     const btn = event.target.closest('[data-action]');
     if (!btn) return;
@@ -5235,16 +6025,43 @@ function bindEvents() {
     const gameId = btn.dataset.gameId;
     if (action === 'move-game-up') handleReorderGame(gameId, -1);
     else if (action === 'move-game-down') handleReorderGame(gameId, 1);
+    else if (action === 'toggle-compete-game') handleToggleCompeteGame(gameId, btn);
     else if (action === 'edit-game') openGameModal(gameId);
     else if (action === 'toggle-archive-game') handleToggleArchiveGame(gameId);
     else if (action === 'delete-game') handleDeleteGame(gameId);
   });
 
-  els.friendsCatalogShelf?.addEventListener('click', (event) => {
+  els.friendsCatalogSearch?.addEventListener('input', () => {
+    state.friendsCatalogSearch = els.friendsCatalogSearch.value;
+    renderFriendsCatalogShelf();
+  });
+
+  els.friendsCatalogTagBar?.addEventListener('click', (event) => {
+    const btn = event.target.closest('.tag-filter-pill[data-tag]');
+    if (!btn) return;
+    const nextTag = btn.dataset.tag || 'All';
+    if (state.friendsCatalogTag === nextTag) return;
+    state.friendsCatalogTag = nextTag;
+    renderFriendsCatalogShelf();
+  });
+
+  els.friendsCatalogCollections?.addEventListener('click', (event) => {
     const btn = event.target.closest('[data-action="subscribe-catalog-game"][data-slug]');
     if (!btn) return;
     handleSubscribeCatalogGame(btn.dataset.slug, btn);
   });
+
+  els.friendsCatalogCollections?.addEventListener(
+    'toggle',
+    (event) => {
+      const details = event.target;
+      if (!details?.matches?.('details.catalog-collection-group[data-collection-key]')) return;
+      const ctx = details.dataset.collectionContext || 'friends';
+      const key = details.dataset.collectionKey;
+      state.openCatalogCollections[`${ctx}:${key}`] = details.open;
+    },
+    true
+  );
 
   els.btnExportJson?.addEventListener('click', handleExportJson);
   els.importFileInput?.addEventListener('change', handleImportFilePicked);
@@ -5335,8 +6152,27 @@ function bindEvents() {
   els.btnCloseGameDialog?.addEventListener('click', () => closeModalDialog(els.gameDialog));
   els.btnCancelGameDialog?.addEventListener('click', () => closeModalDialog(els.gameDialog));
   els.catalogSearchInput?.addEventListener('input', () => {
-    renderCatalogPicker(els.catalogSearchInput.value);
+    renderCatalogPicker(els.catalogSearchInput.value, state.dialogCatalogTag);
   });
+  els.catalogTagBar?.addEventListener('click', (event) => {
+    const btn = event.target.closest('.tag-filter-pill[data-tag]');
+    if (!btn) return;
+    const nextTag = btn.dataset.tag || 'All';
+    if (state.dialogCatalogTag === nextTag) return;
+    state.dialogCatalogTag = nextTag;
+    renderCatalogPicker(els.catalogSearchInput?.value || '', nextTag);
+  });
+  els.catalogAvailableList?.addEventListener(
+    'toggle',
+    (event) => {
+      const details = event.target;
+      if (!details?.matches?.('details.catalog-collection-group[data-collection-key]')) return;
+      const ctx = details.dataset.collectionContext || 'dialog';
+      const key = details.dataset.collectionKey;
+      state.openCatalogCollections[`${ctx}:${key}`] = details.open;
+    },
+    true
+  );
   els.catalogPickerSection?.addEventListener('click', (event) => {
     const btn = event.target.closest('[data-action="subscribe-catalog-game"][data-slug]');
     if (!btn) return;

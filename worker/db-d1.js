@@ -2,11 +2,21 @@
  * Cloudflare D1 async database adapter for Daily Games Hub.
  * ZERO Node built-ins and ZERO module-level mutable request state.
  */
-import { STARTER_GAMES, normalizeEmail } from '../shared/auth-crypto.js';
+import {
+  STARTER_GAMES,
+  OPTIONAL_CATALOG_GAMES,
+  BUILTIN_CATALOG_GAMES,
+  BUILTIN_CATALOG_BY_SLUG,
+  BUILTIN_CATALOG_SLUG_SET,
+  STARTER_SLUG_SET,
+  enrichGameMetadata,
+  normalizeEmail,
+} from '../shared/auth-crypto.js';
 import {
   GENERIC_PARSER,
   PERCEPTLE_ROUNDS,
   normalizeDifficultyLabel,
+  analyzeCluesBySamGrid,
   getParserById,
   getParserForGame,
   parseForGame,
@@ -19,7 +29,6 @@ import {
 
 export const VALID_METRIC_FORMATS = new Set(['number', 'duration_sec', 'percent', 'fraction']);
 export const VALID_METRIC_DIRECTIONS = new Set(['higher_is_better', 'lower_is_better']);
-const STARTER_SLUG_SET = new Set(STARTER_GAMES.map((g) => g.slug));
 const IGNORED_CANONICAL_HOSTS = new Set(['example.com', 'localhost', '127.0.0.1']);
 
 export class ValidationError extends Error {
@@ -95,6 +104,7 @@ const TABLE_STATEMENTS = [
     reset_time TEXT NOT NULL DEFAULT '00:00',
     sort_order INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
+    compete INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     UNIQUE(user_id, slug)
   )`,
@@ -174,6 +184,7 @@ const ALL_MIGRATION_IDS = [
   'perceptle_parser_and_backfill_v1',
   'fermi_magnitudle_grids_backfill_v1',
   'eraly_starter_v1',
+  'clues_accuracy_sizeitup_and_collections_v1',
 ];
 const BACKFILL_TIMEZONE_SLUGS = new Set(['cluesbysam', 'krillion', 'farflung', 'perceptle']);
 const GRID_METRIC_KEYS = [
@@ -185,7 +196,15 @@ const GRID_METRIC_KEYS = [
   'cleanCount',
   'greenCount',
   'yellowCount',
+  'mistakeCount',
+  'singleHintCount',
+  'doubleHintCount',
   'hintCount',
+  'totalHintWeight',
+  'totalTiles',
+  'accuracyPenalty',
+  'isPerfect',
+  'accuracySummary',
 ];
 
 async function runBatched(db, stmts, chunkSize = 50) {
@@ -266,8 +285,8 @@ async function syncStarterGamesOnDb(
             INSERT INTO games (
               user_id, name, slug, url, icon, color, category,
               metric_label, metric_format, metric_direction,
-              parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .bind(
             uid,
@@ -285,6 +304,7 @@ async function syncStarterGamesOnDb(
             g.resetTime,
             sortOrder,
             0,
+            1,
             now,
           ),
       );
@@ -297,7 +317,7 @@ async function syncStarterGamesOnDb(
 }
 
 async function seedCatalogOnDb(db, now = new Date().toISOString()) {
-  const stmts = STARTER_GAMES.map((g) =>
+  const stmts = BUILTIN_CATALOG_GAMES.map((g) =>
     db
       .prepare(`
         INSERT OR IGNORE INTO game_catalog (
@@ -749,6 +769,176 @@ async function backfillAllGameGridsAndFermiOnDb(db) {
   return stmts.length;
 }
 
+async function backfillCluesBySamAccuracyEntriesOnDb(db) {
+  const rowsRes = await db
+    .prepare(`
+      SELECT
+        e.id, e.raw_text, e.parser_id, e.parser_version,
+        e.primary_value, e.display_value, e.puzzle_id,
+        e.metadata_json, e.manual_override, e.play_date,
+        g.slug AS game_slug, g.name AS game_name, g.url AS game_url
+      FROM entries e
+      JOIN games g ON g.id = e.game_id
+      WHERE g.slug = 'cluesbysam' OR g.parser_id = 'cluesbysam' OR e.parser_id = 'cluesbysam'
+    `)
+    .all();
+
+  const rows = rowsRes?.results || [];
+  if (rows.length === 0) return 0;
+
+  const cluesParser = getParserById('cluesbysam');
+  const stmts = [];
+
+  for (const r of rows) {
+    const existingMeta = safeJsonParse(r.metadata_json, {});
+    const merged =
+      existingMeta && typeof existingMeta === 'object' && !Array.isArray(existingMeta)
+        ? { ...existingMeta }
+        : {};
+
+    const rawText = String(r.raw_text ?? '');
+    const hasRawText = rawText.trim().length > 0;
+    const gameCtx = {
+      slug: String(r.game_slug || 'cluesbysam'),
+      name: String(r.game_name || 'Clues by Sam'),
+      url: String(r.game_url || 'https://cluesbysam.com'),
+      parserId: 'cluesbysam',
+    };
+    const parsed =
+      hasRawText && cluesParser
+        ? cluesParser.parse(rawText, gameCtx, String(r.play_date || ''))
+        : null;
+    const parsedMeta = parsed?.metadata && typeof parsed.metadata === 'object' ? parsed.metadata : {};
+
+    if (!merged.difficultyOverride && !normalizeDifficultyLabel(merged.difficulty)) {
+      const parsedDiff = normalizeDifficultyLabel(parsedMeta.difficulty);
+      if (parsedDiff) {
+        merged.difficulty = parsedDiff;
+      }
+    }
+    if (
+      merged.seconds === undefined &&
+      parsedMeta.seconds !== undefined &&
+      parsedMeta.seconds !== null
+    ) {
+      merged.seconds = parsedMeta.seconds;
+    }
+
+    const candidateGrid =
+      (typeof parsedMeta.emojiGrid === 'string' && parsedMeta.emojiGrid.trim()
+        ? parsedMeta.emojiGrid
+        : null) ||
+      (typeof parsedMeta.grid === 'string' && parsedMeta.grid.trim()
+        ? parsedMeta.grid
+        : null) ||
+      (typeof merged.emojiGrid === 'string' && merged.emojiGrid.trim()
+        ? merged.emojiGrid
+        : null) ||
+      (typeof merged.grid === 'string' && merged.grid.trim() ? merged.grid : null);
+
+    const acc = candidateGrid ? analyzeCluesBySamGrid(candidateGrid) : null;
+    if (acc) {
+      for (const key of [
+        'emojiGrid',
+        'grid',
+        'gridRows',
+        'gridCols',
+        'cleanCount',
+        'greenCount',
+        'yellowCount',
+        'mistakeCount',
+        'singleHintCount',
+        'doubleHintCount',
+        'hintCount',
+        'totalHintWeight',
+        'totalTiles',
+        'accuracyPenalty',
+        'isPerfect',
+        'accuracySummary',
+      ]) {
+        merged[key] = acc[key];
+      }
+    }
+
+    const nextMetaJson = JSON.stringify(merged);
+    const prevMetaJson = String(r.metadata_json ?? '{}');
+    const isManual = Boolean(r.manual_override);
+
+    if (isManual) {
+      if (nextMetaJson !== prevMetaJson) {
+        stmts.push(
+          db
+            .prepare('UPDATE entries SET metadata_json = ? WHERE id = ?')
+            .bind(nextMetaJson, Number(r.id)),
+        );
+      }
+      continue;
+    }
+
+    const prevPrimaryValue =
+      r.primary_value === null || r.primary_value === undefined ? null : Number(r.primary_value);
+    const prevDisplayValue = r.display_value ?? null;
+    const prevPuzzleId = r.puzzle_id ?? null;
+
+    let nextParserId = String(r.parser_id ?? 'generic');
+    let nextParserVersion = Number(r.parser_version ?? 1);
+    let nextPrimaryValue = prevPrimaryValue;
+    let nextDisplayValue = prevDisplayValue;
+    let nextPuzzleId = prevPuzzleId;
+
+    if (parsed && cluesParser) {
+      nextParserId = parsed.parserId || cluesParser.id;
+      nextParserVersion = Number(parsed.parserVersion || cluesParser.version || 3);
+      if (
+        nextPrimaryValue === null &&
+        parsed.primaryValue !== null &&
+        parsed.primaryValue !== undefined
+      ) {
+        nextPrimaryValue = parsed.primaryValue;
+        nextDisplayValue = parsed.displayValue ?? prevDisplayValue;
+      }
+      if (!nextPuzzleId && parsed.puzzleId) {
+        nextPuzzleId = parsed.puzzleId;
+      }
+    }
+
+    const changed =
+      nextMetaJson !== prevMetaJson ||
+      nextParserId !== String(r.parser_id ?? 'generic') ||
+      nextParserVersion !== Number(r.parser_version ?? 1) ||
+      nextPrimaryValue !== prevPrimaryValue ||
+      nextDisplayValue !== prevDisplayValue ||
+      nextPuzzleId !== prevPuzzleId;
+
+    if (changed) {
+      stmts.push(
+        db
+          .prepare(`
+            UPDATE entries SET
+              parser_id = ?, parser_version = ?,
+              primary_value = ?, display_value = ?, puzzle_id = ?,
+              metadata_json = ?
+            WHERE id = ?
+          `)
+          .bind(
+            nextParserId,
+            nextParserVersion,
+            nextPrimaryValue,
+            nextDisplayValue,
+            nextPuzzleId,
+            nextMetaJson,
+            Number(r.id),
+          ),
+      );
+    }
+  }
+
+  if (stmts.length > 0) {
+    await runBatched(db, stmts);
+  }
+  return stmts.length;
+}
+
 export async function ensureSchema(db) {
   if (!db) {
     throw new Error('D1 database binding (env.DB) is not configured');
@@ -770,6 +960,12 @@ export async function ensureSchema(db) {
   if (Number(existing?.count || 0) < 6) {
     await db.batch(TABLE_STATEMENTS.map((sql) => db.prepare(sql)));
     await db.batch(INDEX_STATEMENTS.map((sql) => db.prepare(sql)));
+  }
+
+  const gameColsRes = await db.prepare('PRAGMA table_info(games)').all();
+  const gameCols = new Set((gameColsRes?.results || []).map((c) => String(c.name)));
+  if (!gameCols.has('compete')) {
+    await db.prepare('ALTER TABLE games ADD COLUMN compete INTEGER NOT NULL DEFAULT 1').run();
   }
 
   const now = new Date().toISOString();
@@ -943,6 +1139,68 @@ export async function ensureSchema(db) {
         .bind(eralyMigrationId, now),
     );
     await db.batch(stmts);
+  }
+
+  const wave2aMigrationId = 'clues_accuracy_sizeitup_and_collections_v1';
+  const wave2aApplied = await db
+    .prepare('SELECT 1 AS applied FROM schema_migrations WHERE id = ?')
+    .bind(wave2aMigrationId)
+    .first();
+  if (!wave2aApplied) {
+    const migStmts = [
+      db.prepare(
+        `UPDATE games
+         SET name = 'Size It Up',
+             url = 'https://magnitudle.com/size-it-up',
+             category = 'Estimation',
+             parser_id = 'magnitudle'
+         WHERE slug = 'magnitudle' AND name IN ('Magnitudle', 'Size It Up')`,
+      ),
+      db
+        .prepare(
+          `UPDATE game_catalog
+           SET name = 'Size It Up',
+               url = 'https://magnitudle.com/size-it-up',
+               category = 'Estimation',
+               parser_id = 'magnitudle',
+               updated_at = ?
+           WHERE slug = 'magnitudle'`,
+        )
+        .bind(now),
+      ...OPTIONAL_CATALOG_GAMES.map((g) =>
+        db
+          .prepare(`
+            INSERT OR IGNORE INTO game_catalog (
+              slug, name, url, icon, color, category,
+              metric_label, metric_format, metric_direction,
+              parser_id, reset_timezone, reset_time,
+              created_by_user_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+          `)
+          .bind(
+            g.slug,
+            g.name,
+            g.url,
+            g.icon,
+            g.color,
+            g.category,
+            g.metricLabel,
+            g.metricFormat,
+            g.metricDirection,
+            g.parserId,
+            g.resetTimezone,
+            g.resetTime,
+            now,
+            now,
+          ),
+      ),
+    ];
+    await runBatched(db, migStmts);
+    await backfillCluesBySamAccuracyEntriesOnDb(db);
+    await db
+      .prepare('INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+      .bind(wave2aMigrationId, now)
+      .run();
   }
 }
 
@@ -1164,10 +1422,12 @@ function mapGameRow(r) {
     resetTime: String(r.reset_time ?? '00:00'),
     sortOrder: Number(r.sort_order),
     archived: Boolean(r.archived),
+    compete: r.compete === undefined || r.compete === null ? true : Boolean(r.compete),
     createdAt: String(r.created_at),
   };
   return {
     ...base,
+    ...enrichGameMetadata(base),
     resolvedParser: serializeResolvedParser(getParserForGame(base)),
   };
 }
@@ -1301,6 +1561,10 @@ function validateGameFields(input, isCreate = true) {
 
   if (isCreate || input.archived !== undefined) {
     out.archived = Boolean(input.archived);
+  }
+
+  if (isCreate || input.compete !== undefined) {
+    out.compete = input.compete === undefined ? true : Boolean(input.compete);
   }
 
   return out;
@@ -1571,42 +1835,94 @@ export function createD1Database(d1) {
     return schemaPromise;
   }
 
-  async function insertStarterGamesForUser(userId) {
-    const now = new Date().toISOString();
-    const stmts = STARTER_GAMES.map((g) =>
-      d1
-        .prepare(`
-          INSERT INTO games (
-            user_id, name, slug, url, icon, color, category,
-            metric_label, metric_format, metric_direction,
-            parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `)
-        .bind(
-          userId,
-          g.name,
-          g.slug,
-          g.url,
-          g.icon,
-          g.color,
-          g.category,
-          g.metricLabel,
-          g.metricFormat,
-          g.metricDirection,
-          g.parserId,
-          g.resetTimezone,
-          g.resetTime,
-          g.sortOrder,
-          0,
-          now,
-        ),
-    );
-    await d1.batch(stmts);
+  async function normalizeCompetingSlugsInputOnDb(competingSlugs) {
+    if (competingSlugs === undefined) return null;
+    if (!Array.isArray(competingSlugs)) {
+      throw new ValidationError('competingSlugs must be an array of game slugs');
+    }
+    const catRes = await d1.prepare('SELECT * FROM game_catalog').all();
+    const catBySlug = new Map((catRes?.results || []).map((r) => [String(r.slug), r]));
+    const validCatalogSlugs = new Set([
+      ...BUILTIN_CATALOG_BY_SLUG.keys(),
+      ...catBySlug.keys(),
+    ]);
+    const seen = new Set();
+    const slugs = [];
+    for (const raw of competingSlugs) {
+      if (typeof raw !== 'string') continue;
+      const s = slugify(raw.trim());
+      if (!s || seen.has(s) || !validCatalogSlugs.has(s)) continue;
+      seen.add(s);
+      slugs.push(s);
+    }
+    if (slugs.length === 0) {
+      throw new ValidationError('Please select at least one valid game to compete in');
+    }
+    return { slugs, catBySlug };
   }
 
-  async function seedStarterGamesForUser(userId) {
+  function resolveGameTemplateForSlug(slug, catBySlug) {
+    const builtin = BUILTIN_CATALOG_BY_SLUG.get(slug);
+    const c = catBySlug?.get(slug) || null;
+    if (!builtin && !c) return null;
+    return {
+      name: String(c?.name || builtin?.name || slug),
+      slug,
+      url: String(c?.url || builtin?.url || ''),
+      icon: String(c?.icon || builtin?.icon || '🎮'),
+      color: String(c?.color || builtin?.color || '#6366f1'),
+      category: String(c?.category || builtin?.category || 'Daily'),
+      metricLabel: String(c?.metric_label || builtin?.metricLabel || 'Score'),
+      metricFormat: String(c?.metric_format || builtin?.metricFormat || 'number'),
+      metricDirection: String(
+        c?.metric_direction || builtin?.metricDirection || 'higher_is_better',
+      ),
+      parserId: String(c?.parser_id || builtin?.parserId || 'auto'),
+      resetTimezone: String(c?.reset_timezone ?? builtin?.resetTimezone ?? 'local'),
+      resetTime: String(c?.reset_time ?? builtin?.resetTime ?? '00:00'),
+    };
+  }
+
+  function buildInsertGameStmt(uid, tpl, sortOrder, compete, now) {
+    return d1
+      .prepare(`
+        INSERT INTO games (
+          user_id, name, slug, url, icon, color, category,
+          metric_label, metric_format, metric_direction,
+          parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .bind(
+        uid,
+        tpl.name,
+        tpl.slug,
+        tpl.url,
+        tpl.icon,
+        tpl.color,
+        tpl.category,
+        tpl.metricLabel,
+        tpl.metricFormat,
+        tpl.metricDirection,
+        tpl.parserId,
+        tpl.resetTimezone,
+        tpl.resetTime,
+        sortOrder,
+        0,
+        compete ? 1 : 0,
+        now,
+      );
+  }
+
+  async function insertStarterGamesForUser(userId) {
+    const now = new Date().toISOString();
+    const stmts = STARTER_GAMES.map((g) => buildInsertGameStmt(userId, g, g.sortOrder, 1, now));
+    await runBatched(d1, stmts);
+  }
+
+  async function seedStarterGamesForUser(userId, competingSlugs = undefined) {
     await ready();
     const uid = parsePositiveInt(userId, 'userId');
+    const selected = await normalizeCompetingSlugsInputOnDb(competingSlugs);
     const unclaimedRow = await d1
       .prepare('SELECT COUNT(*) AS count FROM games WHERE user_id IS NULL')
       .first();
@@ -1618,6 +1934,33 @@ export function createD1Database(d1) {
       ]);
       if (getChanges(claimRes[0]) > 0) {
         await syncStarterGamesOnDb(d1, uid, { appendSlugs: new Set() });
+        if (selected !== null) {
+          const existingUserGamesRes = await d1
+            .prepare('SELECT id, slug, sort_order FROM games WHERE user_id = ?')
+            .bind(uid)
+            .all();
+          const existingRows = existingUserGamesRes?.results || [];
+          const existingSlugSet = new Set(existingRows.map((r) => String(r.slug)));
+          const selectedSet = new Set(selected.slugs);
+          const stmts = existingRows.map((row) =>
+            d1
+              .prepare('UPDATE games SET compete = ? WHERE id = ? AND user_id = ?')
+              .bind(selectedSet.has(String(row.slug)) ? 1 : 0, Number(row.id), uid),
+          );
+          let nextOrder =
+            existingRows.reduce((acc, r) => Math.max(acc, Number(r.sort_order || 0)), 0) + 1;
+          const now = new Date().toISOString();
+          for (const slug of selected.slugs) {
+            if (existingSlugSet.has(slug)) continue;
+            const tpl = resolveGameTemplateForSlug(slug, selected.catBySlug);
+            if (!tpl) continue;
+            stmts.push(buildInsertGameStmt(uid, tpl, nextOrder, 1, now));
+            nextOrder += 1;
+          }
+          if (stmts.length > 0) {
+            await runBatched(d1, stmts);
+          }
+        }
         return;
       }
     }
@@ -1627,8 +1970,102 @@ export function createD1Database(d1) {
       .bind(uid)
       .first();
     if (Number(existingRow?.count || 0) === 0) {
-      await insertStarterGamesForUser(uid);
+      if (selected === null) {
+        await insertStarterGamesForUser(uid);
+      } else {
+        const now = new Date().toISOString();
+        let nextOrder = 1;
+        const stmts = [];
+        for (const slug of selected.slugs) {
+          const tpl = resolveGameTemplateForSlug(slug, selected.catBySlug);
+          if (!tpl) continue;
+          stmts.push(buildInsertGameStmt(uid, tpl, nextOrder, 1, now));
+          nextOrder += 1;
+        }
+        if (stmts.length > 0) {
+          await runBatched(d1, stmts);
+        }
+      }
     }
+  }
+
+  async function listPublicSignupCatalog() {
+    await ready();
+    const starterIndexBySlug = new Map(STARTER_GAMES.map((g, idx) => [g.slug, idx]));
+    const optionalIndexBySlug = new Map(OPTIONAL_CATALOG_GAMES.map((g, idx) => [g.slug, idx]));
+    const [catalogRes, countRes] = await d1.batch([
+      d1.prepare('SELECT * FROM game_catalog'),
+      d1.prepare(`
+        SELECT
+          slug,
+          COUNT(DISTINCT user_id) AS player_count,
+          COUNT(DISTINCT CASE WHEN compete != 0 THEN user_id END) AS competing_count
+        FROM games
+        WHERE user_id IS NOT NULL AND archived = 0
+        GROUP BY slug
+      `),
+    ]);
+
+    const playerCounts = new Map();
+    const competingCounts = new Map();
+    for (const cr of countRes?.results || []) {
+      const s = String(cr.slug);
+      playerCounts.set(s, Number(cr.player_count || 0));
+      competingCounts.set(s, Number(cr.competing_count || 0));
+    }
+
+    const mapped = (catalogRes?.results || []).map((r) => {
+      const slug = String(r.slug);
+      const base = {
+        slug,
+        name: String(r.name),
+        url: String(r.url),
+        icon: String(r.icon),
+        color: String(r.color),
+        category: String(r.category),
+        metricLabel: String(r.metric_label),
+        metricFormat: String(r.metric_format),
+        metricDirection: String(r.metric_direction),
+      };
+      const meta = enrichGameMetadata(base);
+      const playerCount = playerCounts.get(slug) || 0;
+      const competingCount = competingCounts.get(slug) || 0;
+      const hasCreator = r.created_by_user_id !== null && r.created_by_user_id !== undefined;
+      const isFriendAdded =
+        !meta.isStarter && (hasCreator || !meta.isOptional || playerCount > 0);
+
+      return {
+        ...base,
+        ...meta,
+        isFriendAdded,
+        playerCount,
+        competingCount,
+      };
+    });
+
+    mapped.sort((a, b) => {
+      const groupRank = (item) => {
+        if (item.isStarter) return 0;
+        if (item.isFriendAdded) return 1;
+        return 2;
+      };
+      const ga = groupRank(a);
+      const gb = groupRank(b);
+      if (ga !== gb) return ga - gb;
+
+      if (ga === 0) {
+        return (starterIndexBySlug.get(a.slug) ?? 999) - (starterIndexBySlug.get(b.slug) ?? 999);
+      }
+      if (ga === 1) {
+        return b.playerCount - a.playerCount || a.name.localeCompare(b.name);
+      }
+      const oa = optionalIndexBySlug.get(a.slug) ?? 9999;
+      const ob = optionalIndexBySlug.get(b.slug) ?? 9999;
+      if (oa !== ob) return oa - ob;
+      return a.name.localeCompare(b.name);
+    });
+
+    return mapped;
   }
 
   async function getUserById(id) {
@@ -1657,7 +2094,13 @@ export function createD1Database(d1) {
     };
   }
 
-  async function registerUser({ name, email, passwordHash, passwordSalt }) {
+  async function registerUser({
+    name,
+    email,
+    passwordHash,
+    passwordSalt,
+    competingSlugs = undefined,
+  }) {
     await ready();
     const normalized = normalizeEmail(email);
     if (!normalized) {
@@ -1669,6 +2112,9 @@ export function createD1Database(d1) {
     }
     if (!passwordHash || !passwordSalt) {
       throw new ValidationError('Password hash and salt are required');
+    }
+    if (competingSlugs !== undefined && !Array.isArray(competingSlugs)) {
+      throw new ValidationError('competingSlugs must be an array of game slugs');
     }
 
     const now = new Date().toISOString();
@@ -1690,7 +2136,7 @@ export function createD1Database(d1) {
     }
 
     try {
-      await seedStarterGamesForUser(userId);
+      await seedStarterGamesForUser(userId, competingSlugs);
     } catch (err) {
       try {
         await d1.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();
@@ -1961,8 +2407,8 @@ export function createD1Database(d1) {
           INSERT INTO games (
             user_id, name, slug, url, icon, color, category,
             metric_label, metric_format, metric_direction,
-            parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .bind(
           uid,
@@ -1980,6 +2426,7 @@ export function createD1Database(d1) {
           fields.resetTime,
           sortOrder,
           sqlBool(fields.archived),
+          sqlBool(fields.compete),
           now,
         ),
       buildUpsertCatalogIgnoreStmt(fields, slug, uid, now),
@@ -2020,6 +2467,7 @@ export function createD1Database(d1) {
       resetTime: fields.resetTime ?? existing.resetTime,
       sortOrder: fields.sortOrder ?? existing.sortOrder,
       archived: fields.archived !== undefined ? fields.archived : existing.archived,
+      compete: fields.compete !== undefined ? fields.compete : existing.compete,
     };
 
     const now = new Date().toISOString();
@@ -2029,7 +2477,7 @@ export function createD1Database(d1) {
           UPDATE games SET
             name = ?, slug = ?, url = ?, icon = ?, color = ?, category = ?,
             metric_label = ?, metric_format = ?, metric_direction = ?,
-            parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?
+            parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?, compete = ?
           WHERE id = ? AND user_id = ?
         `)
         .bind(
@@ -2047,6 +2495,7 @@ export function createD1Database(d1) {
           updated.resetTime,
           updated.sortOrder,
           sqlBool(updated.archived),
+          sqlBool(updated.compete),
           existing.id,
           uid,
         ),
@@ -2089,7 +2538,7 @@ export function createD1Database(d1) {
         .run();
     }
 
-    if (updated.slug !== existing.slug && !STARTER_SLUG_SET.has(existing.slug)) {
+    if (updated.slug !== existing.slug && !BUILTIN_CATALOG_SLUG_SET.has(existing.slug)) {
       const remRow = await d1
         .prepare('SELECT COUNT(*) AS count FROM games WHERE slug = ?')
         .bind(existing.slug)
@@ -2159,7 +2608,7 @@ export function createD1Database(d1) {
     await d1.prepare('DELETE FROM games WHERE id = ? AND user_id = ?').bind(gameId, uid).run();
 
     const slug = String(existingRow.slug);
-    if (!STARTER_SLUG_SET.has(slug)) {
+    if (!BUILTIN_CATALOG_SLUG_SET.has(slug)) {
       const remRow = await d1
         .prepare('SELECT COUNT(*) AS count FROM games WHERE slug = ?')
         .bind(slug)
@@ -2173,8 +2622,11 @@ export function createD1Database(d1) {
 
   function buildCatalogList(catalogRows, countRows, viewerGameRows) {
     const playerCounts = new Map();
+    const competingCounts = new Map();
     for (const cr of countRows) {
-      playerCounts.set(String(cr.slug), Number(cr.player_count));
+      const s = String(cr.slug);
+      playerCounts.set(s, Number(cr.player_count || 0));
+      competingCounts.set(s, Number(cr.competing_count || 0));
     }
 
     const viewerGames = new Map();
@@ -2182,6 +2634,7 @@ export function createD1Database(d1) {
       viewerGames.set(String(vr.slug), {
         id: Number(vr.id),
         archived: Boolean(vr.archived),
+        compete: vr.compete === undefined || vr.compete === null ? true : Boolean(vr.compete),
         sortOrder: Number(vr.sort_order),
       });
     }
@@ -2209,18 +2662,23 @@ export function createD1Database(d1) {
         : viewerGame.archived
           ? 'archived'
           : 'active';
+      const createdByUserId =
+        r.created_by_user_id === null || r.created_by_user_id === undefined
+          ? null
+          : Number(r.created_by_user_id);
+      const createdByName = r.created_by_name ? String(r.created_by_name) : null;
+      const meta = enrichGameMetadata(base, { createdByUserId, createdByName });
 
       return {
         ...base,
+        ...meta,
         resolvedParser,
-        isStarter: STARTER_SLUG_SET.has(slug),
-        createdByUserId:
-          r.created_by_user_id === null || r.created_by_user_id === undefined
-            ? null
-            : Number(r.created_by_user_id),
-        createdByName: r.created_by_name ? String(r.created_by_name) : null,
+        createdByUserId,
+        createdByName,
         playerCount: playerCounts.get(slug) || 0,
+        competingCount: competingCounts.get(slug) || 0,
         viewerStatus,
+        viewerCompete: viewerGame ? viewerGame.compete : false,
         viewerGameId: viewerGame ? viewerGame.id : null,
         _viewerSortOrder: viewerGame ? viewerGame.sortOrder : 0,
       };
@@ -2232,7 +2690,11 @@ export function createD1Database(d1) {
       const rb = statusRank[b.viewerStatus];
       if (ra !== rb) return ra - rb;
       if (a.viewerStatus === 'not_added') {
-        return b.playerCount - a.playerCount || a.name.localeCompare(b.name);
+        return (
+          b.playerCount - a.playerCount ||
+          Number(Boolean(b.createdByUserId)) - Number(Boolean(a.createdByUserId)) ||
+          a.name.localeCompare(b.name)
+        );
       }
       if (a.viewerStatus === 'archived') {
         return a.name.localeCompare(b.name);
@@ -2253,12 +2715,15 @@ export function createD1Database(d1) {
         LEFT JOIN users u ON u.id = c.created_by_user_id
       `),
       d1.prepare(`
-        SELECT slug, COUNT(DISTINCT user_id) AS player_count
+        SELECT
+          slug,
+          COUNT(DISTINCT user_id) AS player_count,
+          COUNT(DISTINCT CASE WHEN compete != 0 THEN user_id END) AS competing_count
         FROM games
         WHERE user_id IS NOT NULL AND archived = 0
         GROUP BY slug
       `),
-      d1.prepare('SELECT id, slug, archived, sort_order FROM games WHERE user_id = ?').bind(uid),
+      d1.prepare('SELECT id, slug, archived, compete, sort_order FROM games WHERE user_id = ?').bind(uid),
     ]);
 
     return buildCatalogList(
@@ -2280,7 +2745,10 @@ export function createD1Database(d1) {
         LEFT JOIN users u ON u.id = c.created_by_user_id
       `),
       d1.prepare(`
-        SELECT slug, COUNT(DISTINCT user_id) AS player_count
+        SELECT
+          slug,
+          COUNT(DISTINCT user_id) AS player_count,
+          COUNT(DISTINCT CASE WHEN compete != 0 THEN user_id END) AS competing_count
         FROM games
         WHERE user_id IS NOT NULL AND archived = 0
         GROUP BY slug
@@ -2299,13 +2767,14 @@ export function createD1Database(d1) {
     };
   }
 
-  async function subscribeCatalogGame(rawSlug, userId) {
+  async function subscribeCatalogGame(rawSlug, userId, { compete = true } = {}) {
     await ready();
     const uid = parsePositiveInt(userId, 'userId');
     const slug = slugify(String(rawSlug || ''));
     if (!slug) {
       throw new ValidationError('Game slug is required');
     }
+    const competeVal = sqlBool(compete !== false);
 
     let catRow = await d1.prepare('SELECT * FROM game_catalog WHERE slug = ?').bind(slug).first();
     if (!catRow) {
@@ -2357,8 +2826,8 @@ export function createD1Database(d1) {
 
     if (existing && existing.archived) {
       await d1
-        .prepare('UPDATE games SET archived = 0, sort_order = ? WHERE id = ? AND user_id = ?')
-        .bind(nextOrder, Number(existing.id), uid)
+        .prepare('UPDATE games SET archived = 0, compete = ?, sort_order = ? WHERE id = ? AND user_id = ?')
+        .bind(competeVal, nextOrder, Number(existing.id), uid)
         .run();
       return { game: await getGameById(Number(existing.id), uid), status: 'restored' };
     }
@@ -2369,8 +2838,8 @@ export function createD1Database(d1) {
         INSERT INTO games (
           user_id, name, slug, url, icon, color, category,
           metric_label, metric_format, metric_direction,
-          parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+          parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `)
       .bind(
         uid,
@@ -2387,6 +2856,7 @@ export function createD1Database(d1) {
         String(catRow.reset_timezone ?? 'local'),
         String(catRow.reset_time ?? '00:00'),
         nextOrder,
+        competeVal,
         now,
       )
       .run();
@@ -2810,7 +3280,7 @@ export function createD1Database(d1) {
             UPDATE games SET
               name = ?, url = ?, icon = ?, color = ?, category = ?,
               metric_label = ?, metric_format = ?, metric_direction = ?,
-              parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?
+              parser_id = ?, reset_timezone = ?, reset_time = ?, sort_order = ?, archived = ?, compete = ?
             WHERE id = ? AND user_id = ?
           `)
           .bind(
@@ -2827,6 +3297,7 @@ export function createD1Database(d1) {
             fields.resetTime,
             sortOrder,
             sqlBool(fields.archived),
+            sqlBool(fields.compete),
             mappedId,
             uid,
           )
@@ -2849,8 +3320,8 @@ export function createD1Database(d1) {
               INSERT INTO games (
                 id, user_id, name, slug, url, icon, color, category,
                 metric_label, metric_format, metric_direction,
-                parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `)
             .bind(
               rawGame.id,
@@ -2869,6 +3340,7 @@ export function createD1Database(d1) {
               fields.resetTime,
               sortOrder,
               sqlBool(fields.archived),
+              sqlBool(fields.compete),
               createdAt,
             )
             .run();
@@ -2879,8 +3351,8 @@ export function createD1Database(d1) {
               INSERT INTO games (
                 user_id, name, slug, url, icon, color, category,
                 metric_label, metric_format, metric_direction,
-                parser_id, reset_timezone, reset_time, sort_order, archived, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                parser_id, reset_timezone, reset_time, sort_order, archived, compete, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `)
             .bind(
               uid,
@@ -2898,6 +3370,7 @@ export function createD1Database(d1) {
               fields.resetTime,
               sortOrder,
               sqlBool(fields.archived),
+              sqlBool(fields.compete),
               createdAt,
             )
             .run();
@@ -3030,6 +3503,7 @@ export function createD1Database(d1) {
     getSessionByTokenHash,
     deleteSessionByTokenHash,
     seedStarterGamesForUser,
+    listPublicSignupCatalog,
     listGames,
     getGameById,
     createGame,

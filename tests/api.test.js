@@ -10,11 +10,15 @@ import {
   addDays,
   DIFFICULTY_COLORS,
   computeStreaks,
+  computePersonalBest,
   computeGameStats,
   computeCardSummaries,
   computeDailyOverview,
   extractShareGrid,
   computePlayersLeaderboard,
+  isCluesBySamGame,
+  getCluesBySamAccuracy,
+  compareCluesBySamEntries,
 } from '../server/stats.js';
 import { getGamePuzzleStatus, getLocalDateString } from '../shared/parsers/registry.js';
 import { hashPassword } from '../shared/auth-crypto.js';
@@ -87,10 +91,16 @@ async function startTestApp(dbPath = ':memory:') {
   };
 }
 
-async function registerUser(client, { name = 'Alice', email = 'alice@example.com', password = 'password123' } = {}) {
+async function registerUser(
+  client,
+  { name = 'Alice', email = 'alice@example.com', password = 'password123', competingSlugs = undefined } = {},
+) {
   const res = await client.request('/api/auth/register', {
     method: 'POST',
-    body: { name, email, password },
+    body:
+      competingSlugs !== undefined
+        ? { name, email, password, competingSlugs }
+        : { name, email, password },
   });
   assert.equal(res.status, 201, `Expected 201 registering ${email}, got ${res.status}: ${res.text}`);
   return res;
@@ -250,12 +260,12 @@ test('non-destructively migrates legacy pre-auth DB, preserves entries, and clai
     try {
       const meBeforeClaim = await ctx.request('/api/auth/me');
       assert.equal(meBeforeClaim.status, 200);
-      assert.deepEqual(meBeforeClaim.json, {
-        authenticated: false,
-        user: null,
-        hasUsers: false,
-        unclaimed: { gamesCount: 10, entriesCount: 1 },
-      });
+      assert.equal(meBeforeClaim.json.authenticated, false);
+      assert.equal(meBeforeClaim.json.user, null);
+      assert.equal(meBeforeClaim.json.hasUsers, false);
+      assert.deepEqual(meBeforeClaim.json.unclaimed, { gamesCount: 10, entriesCount: 1 });
+      assert.ok(Array.isArray(meBeforeClaim.json.signupCatalog));
+      assert.equal(meBeforeClaim.json.signupCatalog.length, 36);
     } finally {
       await ctx.close();
     }
@@ -1516,12 +1526,20 @@ test('shared hub game_catalog, 1-click subscribe/restore, URL dedup, orphan clea
     'not_added',
   );
 
+  // Viewer-scoped Leaderboard: Alice sees nyt-connections, Bob does not before subscribing
+  const aliceLbConn = await alice.request('/api/leaderboard?gameSlug=nyt-connections');
+  assert.equal(aliceLbConn.status, 200);
+  assert.equal(aliceLbConn.json.gameBoard.game.slug, 'nyt-connections');
+  assert.equal(aliceLbConn.json.gameBoard.game.viewerHasGame, true);
+  assert.equal(aliceLbConn.json.gameBoard.game.playerCount, 1);
+
   const bobLb = await bob.request('/api/leaderboard?gameSlug=nyt-connections');
   assert.equal(bobLb.status, 200);
-  assert.equal(bobLb.json.gameBoard.game.slug, 'nyt-connections');
-  assert.equal(bobLb.json.gameBoard.game.viewerHasGame, false);
-  assert.equal(bobLb.json.gameBoard.game.viewerArchivedGame, false);
-  assert.equal(bobLb.json.gameBoard.game.playerCount, 1);
+  assert.equal(
+    bobLb.json.catalogGames.some((c) => c.slug === 'nyt-connections'),
+    false,
+  );
+  assert.notEqual(bobLb.json.gameBoard.game.slug, 'nyt-connections');
 
   // Bob subscribes (201) -> repeat (200 already_active) -> archive + restore (200 restored)
   const sub1 = await bob.request('/api/catalog/subscribe', {
@@ -1532,6 +1550,14 @@ test('shared hub game_catalog, 1-click subscribe/restore, URL dedup, orphan clea
   assert.equal(sub1.json.status, 'subscribed');
   assert.equal(sub1.json.game.slug, 'nyt-connections');
   assert.equal(sub1.json.game.archived, false);
+  assert.equal(sub1.json.game.compete, true);
+
+  const bobLbAfterSub = await bob.request('/api/leaderboard?gameSlug=nyt-connections');
+  assert.equal(bobLbAfterSub.status, 200);
+  assert.equal(bobLbAfterSub.json.gameBoard.game.slug, 'nyt-connections');
+  assert.equal(bobLbAfterSub.json.gameBoard.game.viewerHasGame, true);
+  assert.equal(bobLbAfterSub.json.gameBoard.game.viewerArchivedGame, false);
+  assert.equal(bobLbAfterSub.json.gameBoard.game.playerCount, 2);
 
   const sub2 = await bob.request('/api/catalog/subscribe', {
     method: 'POST',
@@ -1546,8 +1572,15 @@ test('shared hub game_catalog, 1-click subscribe/restore, URL dedup, orphan clea
   });
 
   const bobLbArchived = await bob.request('/api/leaderboard?gameSlug=nyt-connections');
-  assert.equal(bobLbArchived.json.gameBoard.game.viewerHasGame, false);
-  assert.equal(bobLbArchived.json.gameBoard.game.viewerArchivedGame, true);
+  assert.equal(
+    bobLbArchived.json.catalogGames.some((c) => c.slug === 'nyt-connections'),
+    false,
+  );
+  const bobBootArchived = await bob.request('/api/bootstrap');
+  assert.equal(
+    bobBootArchived.json.catalog.find((c) => c.slug === 'nyt-connections')?.viewerStatus,
+    'archived',
+  );
 
   const sub3 = await bob.request('/api/catalog/subscribe', {
     method: 'POST',
@@ -1556,6 +1589,11 @@ test('shared hub game_catalog, 1-click subscribe/restore, URL dedup, orphan clea
   assert.equal(sub3.status, 200);
   assert.equal(sub3.json.status, 'restored');
   assert.equal(sub3.json.game.archived, false);
+
+  const bobLbRestored = await bob.request('/api/leaderboard?gameSlug=nyt-connections');
+  assert.equal(bobLbRestored.json.gameBoard.game.slug, 'nyt-connections');
+  assert.equal(bobLbRestored.json.gameBoard.game.viewerHasGame, true);
+  assert.equal(bobLbRestored.json.gameBoard.game.viewerArchivedGame, false);
 
   // URL deduplication: Alice adds Costcodle, Dana creates Costco Daily with https://www.costcodle.com/ -> adopts 'costcodle'
   const aliceCostco = await alice.request('/api/games', {
@@ -2918,6 +2956,602 @@ test('eraly_starter_v1 migration appends Eraly onto a 9-game legacy shelf withou
 
     const db2 = createDatabase({ dbPath });
     assert.equal(db2.listGames({ userId: 1 }).some((g) => g.slug === 'eraly'), false);
+    db2.close();
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('public signupCatalog exposes starters, friend picks, and 26 optional games without emails; register honors competingSlugs', async (t) => {
+  const ctx = await startTestApp(':memory:');
+  t.after(() => ctx.close());
+
+  const alice = ctx.createClient();
+  await registerUser(alice, { name: 'Alice', email: 'alice@example.com' });
+
+  // Alice adds a custom game so it becomes a friend pick on public signupCatalog
+  const createMini = await alice.request('/api/games', {
+    method: 'POST',
+    body: {
+      name: 'NYT Mini',
+      url: 'https://nytimes.com/mini',
+      category: 'Word',
+      metricLabel: 'Seconds',
+      metricFormat: 'duration_sec',
+      metricDirection: 'lower_is_better',
+    },
+  });
+  assert.equal(createMini.status, 201);
+  assert.equal(createMini.json.game.compete, true);
+
+  const anon = ctx.createClient();
+  const meRes = await anon.request('/api/auth/me');
+  assert.equal(meRes.status, 200);
+  assert.equal(meRes.json.authenticated, false);
+  assert.ok(Array.isArray(meRes.json.signupCatalog));
+  assert.equal(meRes.json.signupCatalog.length, 37);
+
+  // Security: zero emails or user identifiers leaked on unauthenticated signupCatalog
+  assert.equal(meRes.text.includes('alice@example.com'), false);
+  assert.equal(
+    meRes.json.signupCatalog.some((g) => 'email' in g || 'createdByUserId' in g || 'userId' in g),
+    false,
+  );
+
+  const sizeItUp = meRes.json.signupCatalog.find((g) => g.slug === 'magnitudle');
+  assert.equal(sizeItUp?.name, 'Size It Up');
+  assert.equal(sizeItUp?.isStarter, true);
+  assert.equal(sizeItUp?.isOptional, false);
+  assert.equal(sizeItUp?.collection, 'Magnitudle');
+  assert.ok(sizeItUp?.tags.includes('Estimation'));
+
+  const miniCat = meRes.json.signupCatalog.find((g) => g.slug === 'nyt-mini');
+  assert.equal(miniCat?.isFriendAdded, true);
+  assert.equal(miniCat?.playerCount, 1);
+
+  const passportCat = meRes.json.signupCatalog.find((g) => g.slug === 'passportq');
+  assert.equal(passportCat?.isOptional, true);
+  assert.equal(passportCat?.collection, 'FlightQ');
+
+  // Empty or non-array competingSlugs -> 400 validation error
+  const badEmpty = await ctx.createClient().request('/api/auth/register', {
+    method: 'POST',
+    body: {
+      name: 'EmptyUser',
+      email: 'empty@example.com',
+      password: 'password123',
+      competingSlugs: [],
+    },
+  });
+  assert.equal(badEmpty.status, 400);
+
+  const badUnknown = await ctx.createClient().request('/api/auth/register', {
+    method: 'POST',
+    body: {
+      name: 'UnknownUser',
+      email: 'unknown@example.com',
+      password: 'password123',
+      competingSlugs: ['nonexistent-slug'],
+    },
+  });
+  assert.equal(badUnknown.status, 400);
+
+  // Bob registers selecting only 3 games: 1 starter + 2 optional FlightQ games
+  const bob = ctx.createClient();
+  await registerUser(bob, {
+    name: 'Bob',
+    email: 'bob@example.com',
+    competingSlugs: ['cluesbysam', 'passportq', 'skyq'],
+  });
+
+  const bobBoot = await bob.request('/api/bootstrap?date=2026-11-16');
+  assert.equal(bobBoot.status, 200);
+  assert.deepEqual(
+    bobBoot.json.games.map((g) => g.slug),
+    ['cluesbysam', 'passportq', 'skyq'],
+  );
+  assert.equal(bobBoot.json.dailyOverview.activeGamesCount, 3);
+  assert.ok(bobBoot.json.games.every((g) => g.compete === true));
+  assert.equal(bobBoot.json.games.find((g) => g.slug === 'passportq')?.collection, 'FlightQ');
+  assert.equal(bobBoot.json.games.find((g) => g.slug === 'passportq')?.isOptional, true);
+
+  const bobLb = await bob.request('/api/leaderboard?date=2026-11-16');
+  assert.equal(bobLb.status, 200);
+  assert.equal(bobLb.json.competingGamesCount, 3);
+  assert.deepEqual(
+    bobLb.json.catalogGames.map((g) => g.slug),
+    ['cluesbysam', 'passportq', 'skyq'],
+  );
+  assert.equal(bobLb.json.overallStandings.find((p) => p.displayName === 'Bob').activeGamesCount, 3);
+});
+
+test('compete toggle keeps game on Today shelf while excluding solo plays from Leaderboard & friend medals, plus optional catalog orphan protection', async (t) => {
+  const ctx = await startTestApp(':memory:');
+  t.after(() => ctx.close());
+
+  const alice = ctx.createClient();
+  const bob = ctx.createClient();
+  await registerUser(alice, {
+    name: 'Alice',
+    email: 'alice@example.com',
+    competingSlugs: ['cluesbysam', 'krillion'],
+  });
+  await registerUser(bob, {
+    name: 'Bob',
+    email: 'bob@example.com',
+    competingSlugs: ['cluesbysam', 'krillion'],
+  });
+
+  // Bob subscribes to optional FlightQ SkyQ as solo only (compete: false), then deletes it
+  const skySub = await bob.request('/api/catalog/subscribe', {
+    method: 'POST',
+    body: { slug: 'skyq', compete: false },
+  });
+  assert.equal(skySub.status, 201);
+  assert.equal(skySub.json.game.compete, false);
+
+  const bobCatWithSky = await bob.request('/api/catalog');
+  const skyEntry = bobCatWithSky.json.catalog.find((c) => c.slug === 'skyq');
+  assert.equal(skyEntry?.viewerStatus, 'active');
+  assert.equal(skyEntry?.viewerCompete, false);
+  assert.equal(skyEntry?.playerCount, 1);
+  assert.equal(skyEntry?.competingCount, 0);
+
+  // Deleting an optional catalog game removes Bob's row but never deletes SkyQ from game_catalog
+  const delSky = await bob.request(`/api/games/${skySub.json.game.id}`, { method: 'DELETE' });
+  assert.equal(delSky.status, 200);
+  const bobCatAfterDel = await bob.request('/api/catalog');
+  const skyAfterDel = bobCatAfterDel.json.catalog.find((c) => c.slug === 'skyq');
+  assert.ok(skyAfterDel);
+  assert.equal(skyAfterDel.viewerStatus, 'not_added');
+  assert.equal(skyAfterDel.playerCount, 0);
+
+  // Both play Clues by Sam; Bob gets faster perfect score, then toggles Clues by Sam to solo (compete: false)
+  const aliceBoot = await alice.request('/api/bootstrap?date=2026-11-16');
+  const bobBoot = await bob.request('/api/bootstrap?date=2026-11-16');
+  const aliceClues = aliceBoot.json.games.find((g) => g.slug === 'cluesbysam');
+  const bobClues = bobBoot.json.games.find((g) => g.slug === 'cluesbysam');
+  const bobKrillion = bobBoot.json.games.find((g) => g.slug === 'krillion');
+
+  const perfectGrid = '🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩';
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aliceClues.id,
+      playDate: '2026-11-16',
+      rawText: `I solved the daily Clues by Sam (Nov 16th 2026) in 05:00\n${perfectGrid}`,
+    },
+  });
+  await bob.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: bobClues.id,
+      playDate: '2026-11-16',
+      rawText: `I solved the daily Clues by Sam (Nov 16th 2026) in 02:00\n${perfectGrid}`,
+    },
+  });
+
+  // While competing, Bob holds Rank 1 Gold (3 pts) and Alice Rank 2 Silver (2 pts)
+  const aliceLbBefore = await alice.request('/api/leaderboard?date=2026-11-16&gameSlug=cluesbysam');
+  assert.equal(
+    aliceLbBefore.json.gameBoard.standings.find((s) => s.displayName === 'Bob').today.rank,
+    1,
+  );
+  assert.equal(
+    aliceLbBefore.json.gameBoard.standings.find((s) => s.displayName === 'Alice').today.rank,
+    2,
+  );
+
+  // Bob switches Clues by Sam to solo only
+  const toggleBob = await bob.request(`/api/games/${bobClues.id}`, {
+    method: 'PUT',
+    body: { compete: false },
+  });
+  assert.equal(toggleBob.status, 200);
+  assert.equal(toggleBob.json.game.compete, false);
+
+  // Still on Bob's Today shelf with Bob's entry intact
+  const bobBootSolo = await bob.request('/api/bootstrap?date=2026-11-16');
+  assert.equal(bobBootSolo.json.games.find((g) => g.slug === 'cluesbysam')?.compete, false);
+  assert.equal(bobBootSolo.json.entries.filter((e) => e.gameId === bobClues.id).length, 1);
+
+  // Excluded from Bob's Leaderboard
+  const bobLbSolo = await bob.request('/api/leaderboard?date=2026-11-16');
+  assert.equal(bobLbSolo.json.competingGamesCount, 1);
+  assert.deepEqual(
+    bobLbSolo.json.catalogGames.map((g) => g.slug),
+    ['krillion'],
+  );
+
+  // Excluded from Alice's Clues by Sam leaderboard & medals -> Alice now holds solo Rank 1 Gold
+  const aliceLbAfter = await alice.request('/api/leaderboard?date=2026-11-16&gameSlug=cluesbysam');
+  assert.equal(aliceLbAfter.json.gameBoard.game.playerCount, 1);
+  assert.equal(
+    aliceLbAfter.json.gameBoard.standings.find((s) => s.displayName === 'Alice').today.rank,
+    1,
+  );
+  assert.equal(
+    aliceLbAfter.json.gameBoard.standings.find((s) => s.displayName === 'Bob').today,
+    null,
+  );
+  assert.equal(
+    aliceLbAfter.json.gameBoard.standings.find((s) => s.displayName === 'Bob').gamePoints,
+    0,
+  );
+
+  // Bob toggles Krillion to solo as well -> 0 competing games empty state
+  await bob.request(`/api/games/${bobKrillion.id}`, {
+    method: 'PUT',
+    body: { compete: false },
+  });
+  const bobLbEmpty = await bob.request('/api/leaderboard?date=2026-11-16');
+  assert.equal(bobLbEmpty.json.competingGamesCount, 0);
+  assert.deepEqual(bobLbEmpty.json.catalogGames, []);
+  assert.equal(bobLbEmpty.json.selectedGameSlug, null);
+  assert.deepEqual(bobLbEmpty.json.gameBoard, { game: null, standings: [] });
+});
+
+test('Clues by Sam weighted accuracy-first ranking (0 vs 1🟨 vs 2🟡 vs 3🟠), tie break by time, PB, and spoiler redaction', async (t) => {
+  const ctx = await startTestApp(':memory:');
+  t.after(() => ctx.close());
+
+  const alice = ctx.createClient();
+  const bob = ctx.createClient();
+  const cara = ctx.createClient();
+  const dana = ctx.createClient();
+
+  await registerUser(alice, { name: 'Alice', email: 'alice@example.com', competingSlugs: ['cluesbysam'] });
+  await registerUser(bob, { name: 'Bob', email: 'bob@example.com', competingSlugs: ['cluesbysam'] });
+  await registerUser(cara, { name: 'Cara', email: 'cara@example.com', competingSlugs: ['cluesbysam'] });
+  await registerUser(dana, { name: 'Dana', email: 'dana@example.com', competingSlugs: ['cluesbysam'] });
+
+  const getCluesId = async (client) => {
+    const boot = await client.request('/api/bootstrap?date=2026-11-16');
+    return boot.json.games.find((g) => g.slug === 'cluesbysam').id;
+  };
+  const [aId, bId, cId, dId] = await Promise.all([
+    getCluesId(alice),
+    getCluesId(bob),
+    getCluesId(cara),
+    getCluesId(dana),
+  ]);
+
+  const perfectGrid = '🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩'; // penalty 0
+  const mistakeGrid = '🟨🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩'; // penalty 1 (1🟨)
+  const hintGrid = '🟡🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩'; // penalty 2 (1🟡)
+  const doubleHintGrid = '🟠🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩'; // penalty 3 (1🟠)
+
+  // Slowest perfect beats faster 1-mistake beats faster 1-hint beats fastest 1-double-hint
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aId,
+      playDate: '2026-11-16',
+      rawText: `I solved the daily Clues by Sam (Nov 16th 2026) in 15:00\n${perfectGrid}`,
+    },
+  });
+  await bob.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: bId,
+      playDate: '2026-11-16',
+      rawText: `I solved the daily Clues by Sam (Nov 16th 2026) in 02:00\n${mistakeGrid}`,
+    },
+  });
+  await cara.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: cId,
+      playDate: '2026-11-16',
+      rawText: `I solved the daily Clues by Sam (Nov 16th 2026) in 01:30\n${hintGrid}`,
+    },
+  });
+  await dana.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: dId,
+      playDate: '2026-11-16',
+      rawText: `I solved the daily Clues by Sam (Nov 16th 2026) in 01:00\n${doubleHintGrid}`,
+    },
+  });
+
+  // Also test Alice Personal Best accuracy-first: earlier faster run with mistake (02:00, 1🟨) must NOT beat 0-penalty 15:00!
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aId,
+      playDate: '2026-11-14',
+      rawText: `I solved the daily Clues by Sam (Nov 14th 2026) in 02:00\n${mistakeGrid}`,
+    },
+  });
+
+  const aliceStats = await alice.request(`/api/stats?gameId=${aId}`);
+  assert.equal(aliceStats.status, 200);
+  assert.equal(aliceStats.json.gameStats.kpis.personalBest.value, 900);
+  assert.equal(aliceStats.json.gameStats.kpis.personalBest.accuracyPenalty, 0);
+  assert.equal(aliceStats.json.gameStats.kpis.personalBest.accuracySummary, '20/20 🟩');
+  const ptNov14 = aliceStats.json.gameStats.trendSeries.find((p) => p.playDate === '2026-11-14');
+  const ptNov16 = aliceStats.json.gameStats.trendSeries.find((p) => p.playDate === '2026-11-16');
+  assert.equal(ptNov14?.isPersonalBest, false);
+  assert.equal(ptNov16?.isPersonalBest, true);
+
+  // Equal penalty ties break by solve time, and Bob stays unplayed on 2026-11-17 for spoiler test
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aId,
+      playDate: '2026-11-15',
+      rawText: `I solved the daily Clues by Sam (Nov 15th 2026) in 04:00\n${mistakeGrid}`,
+    },
+  });
+  await bob.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: bId,
+      playDate: '2026-11-15',
+      rawText: `I solved the daily Clues by Sam (Nov 15th 2026) in 03:00\n${mistakeGrid}`,
+    },
+  });
+
+  const lbNov16 = await alice.request('/api/leaderboard?date=2026-11-16&gameSlug=cluesbysam');
+  assert.equal(lbNov16.status, 200);
+  const byName = new Map(lbNov16.json.gameBoard.standings.map((s) => [s.displayName, s]));
+  assert.equal(byName.get('Alice').today.rank, 1);
+  assert.equal(byName.get('Alice').today.medal, 'gold');
+  assert.equal(byName.get('Alice').today.accuracyPenalty, 0);
+  assert.equal(byName.get('Alice').today.accuracySummary, '20/20 🟩');
+
+  assert.equal(byName.get('Bob').today.rank, 2);
+  assert.equal(byName.get('Bob').today.medal, 'silver');
+  assert.equal(byName.get('Bob').today.accuracyPenalty, 1);
+  assert.equal(byName.get('Bob').today.accuracySummary, '19🟩 1🟨');
+
+  assert.equal(byName.get('Cara').today.rank, 3);
+  assert.equal(byName.get('Cara').today.medal, 'bronze');
+  assert.equal(byName.get('Cara').today.accuracyPenalty, 2);
+
+  assert.equal(byName.get('Dana').today.rank, 4);
+  assert.equal(byName.get('Dana').today.medal, null);
+  assert.equal(byName.get('Dana').today.accuracyPenalty, 3);
+
+  // On 2026-11-15 both Alice and Bob had penalty 1; faster Bob gets Rank 1 Gold and Alice gets Rank 2 Silver
+  const lbNov15 = await alice.request('/api/leaderboard?date=2026-11-15&gameSlug=cluesbysam');
+  const nov15Standings = new Map(lbNov15.json.gameBoard.standings.map((s) => [s.displayName, s]));
+  assert.equal(nov15Standings.get('Bob').today.rank, 1);
+  assert.equal(nov15Standings.get('Alice').today.rank, 2);
+
+  // Spoiler shield redacts accuracySummary (and emojiGrid) for unplayed Cara on 2026-11-17
+  await alice.request('/api/entries', {
+    method: 'POST',
+    body: {
+      gameId: aId,
+      playDate: '2026-11-17',
+      rawText: `I solved the daily Clues by Sam (Nov 17th 2026) in 02:30\n${perfectGrid}`,
+    },
+  });
+  const caraBeforePlay = await cara.request('/api/leaderboard?date=2026-11-17&gameSlug=cluesbysam');
+  const aliceCellProtected = caraBeforePlay.json.todayMatrix.rows.find(
+    (r) => r.displayName === 'Alice',
+  ).cells.cluesbysam;
+  assert.equal(aliceCellProtected.spoilerProtected, true);
+  assert.equal(aliceCellProtected.emojiGrid, null);
+  assert.equal(aliceCellProtected.accuracySummary, null);
+
+  // Pure helper unit assertions
+  assert.equal(isCluesBySamGame({ slug: 'cluesbysam' }), true);
+  const accCheck = getCluesBySamAccuracy({ metadata: { emojiGrid: `🟩🟨\n🟡🟠` } });
+  assert.equal(accCheck.accuracyPenalty, 6);
+  assert.equal(compareCluesBySamEntries(
+    { solved: true, primaryValue: 900, metadata: { emojiGrid: perfectGrid } },
+    { solved: true, primaryValue: 60, metadata: { emojiGrid: doubleHintGrid } },
+  ) < 0, true);
+  const purePb = computePersonalBest(
+    [
+      { completed: true, solved: true, playDate: '2026-11-10', primaryValue: 90, metadata: { emojiGrid: mistakeGrid } },
+      { completed: true, solved: true, playDate: '2026-11-11', primaryValue: 400, metadata: { emojiGrid: perfectGrid } },
+    ],
+    'lower_is_better',
+    { slug: 'cluesbysam' },
+  );
+  assert.equal(purePb?.value, 400);
+  assert.equal(purePb?.accuracyPenalty, 0);
+});
+
+test('clues_accuracy_sizeitup_and_collections_v1 migrates legacy DB: adds compete, renames Size It Up, seeds optional catalog, backfills Clues accuracy safely', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-games-wave2a-mig-'));
+  const dbPath = path.join(tmpDir, 'legacy.db');
+
+  try {
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE games (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        url TEXT NOT NULL,
+        icon TEXT NOT NULL DEFAULT '🎮',
+        color TEXT NOT NULL DEFAULT '#6366f1',
+        category TEXT NOT NULL DEFAULT 'Daily',
+        metric_label TEXT NOT NULL DEFAULT 'Score',
+        metric_format TEXT NOT NULL DEFAULT 'number',
+        metric_direction TEXT NOT NULL DEFAULT 'higher_is_better',
+        parser_id TEXT NOT NULL DEFAULT 'auto',
+        reset_timezone TEXT NOT NULL DEFAULT 'local',
+        reset_time TEXT NOT NULL DEFAULT '00:00',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(user_id, slug)
+      );
+      CREATE TABLE entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        play_date TEXT NOT NULL,
+        raw_text TEXT NOT NULL DEFAULT '',
+        parser_id TEXT NOT NULL DEFAULT 'generic',
+        parser_version INTEGER NOT NULL DEFAULT 1,
+        completed INTEGER NOT NULL DEFAULT 1,
+        solved INTEGER,
+        primary_value REAL,
+        display_value TEXT,
+        puzzle_id TEXT,
+        breakdown_json TEXT NOT NULL DEFAULT '[]',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT NOT NULL DEFAULT '',
+        manual_override INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(game_id, play_date)
+      );
+      CREATE TABLE schema_migrations (
+        id TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      CREATE TABLE game_catalog (
+        slug TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        icon TEXT NOT NULL DEFAULT '🎮',
+        color TEXT NOT NULL DEFAULT '#6366f1',
+        category TEXT NOT NULL DEFAULT 'Daily',
+        metric_label TEXT NOT NULL DEFAULT 'Score',
+        metric_format TEXT NOT NULL DEFAULT 'number',
+        metric_direction TEXT NOT NULL DEFAULT 'higher_is_better',
+        parser_id TEXT NOT NULL DEFAULT 'auto',
+        reset_timezone TEXT NOT NULL DEFAULT 'local',
+        reset_time TEXT NOT NULL DEFAULT '00:00',
+        created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO schema_migrations (id, applied_at) VALUES
+        ('wave2_starters_and_cluesbysam_v1', '2026-11-15T00:00:00Z'),
+        ('cluesbysam_difficulty_backfill_v1', '2026-11-15T00:00:00Z'),
+        ('perceptle_parser_and_backfill_v1', '2026-11-15T00:00:00Z'),
+        ('fermi_magnitudle_grids_backfill_v1', '2026-11-15T00:00:00Z'),
+        ('eraly_starter_v1', '2026-11-16T00:00:00Z');
+      INSERT INTO users (id, email, display_name, password_hash, password_salt, created_at)
+      VALUES
+        (1, 'p1@example.com', 'Player1', 'h', 's', '2026-11-01T00:00:00Z'),
+        (2, 'p2@example.com', 'Player2', 'h', 's', '2026-11-01T00:00:00Z');
+      INSERT INTO games (id, user_id, name, slug, url, metric_label, metric_format, metric_direction, parser_id, sort_order, archived, created_at)
+      VALUES
+        (1, 1, 'Clues by Sam', 'cluesbysam', 'https://cluesbysam.com', 'Solve Time', 'duration_sec', 'lower_is_better', 'cluesbysam', 1, 0, '2026-11-01T00:00:00Z'),
+        (2, 1, 'Magnitudle', 'magnitudle', 'https://magnitudle.com', 'Score', 'number', 'higher_is_better', 'magnitudle', 2, 0, '2026-11-01T00:00:00Z'),
+        (3, 2, 'Custom Size Game', 'magnitudle', 'https://magnitudle.com', 'Score', 'number', 'higher_is_better', 'magnitudle', 1, 0, '2026-11-01T00:00:00Z');
+      INSERT INTO game_catalog (slug, name, url, category, parser_id, created_at, updated_at)
+      VALUES ('magnitudle', 'Magnitudle', 'https://magnitudle.com', 'Trivia', 'magnitudle', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z');
+    `);
+    const insEntry = legacy.prepare(`
+      INSERT INTO entries (
+        id, user_id, game_id, play_date, raw_text, parser_id, parser_version,
+        completed, solved, primary_value, display_value, puzzle_id,
+        breakdown_json, metadata_json, manual_override, created_at, updated_at
+      ) VALUES (?, 1, 1, ?, ?, 'cluesbysam', 2, 1, 1, ?, ?, ?, '[]', ?, ?, '2026-11-15T00:00:00Z', '2026-11-15T00:00:00Z')
+    `);
+    insEntry.run(
+      1,
+      '2026-11-16',
+      'I solved the daily Clues by Sam (Nov 16th 2026) in 03:10\n🟩🟩🟨🟡\n🟩🟩🟩🟠',
+      190,
+      '03:10',
+      null,
+      JSON.stringify({ emojiGrid: '🟩🟩🟨🟡\n🟩🟩🟩🟠', difficulty: 'Hard' }),
+      0,
+    );
+    insEntry.run(
+      2,
+      '2026-11-15',
+      'I solved the daily Clues by Sam (Nov 15th 2026) in 02:00\n🟩🟩🟩🟩\n🟩🟩🟩🟩',
+      777,
+      'Custom 777',
+      '#55',
+      JSON.stringify({
+        difficulty: 'Brutal',
+        difficultyOverride: true,
+        emojiGrid: '🟩🟩🟩🟩\n🟩🟩🟩🟩',
+      }),
+      1,
+    );
+    insEntry.run(
+      3,
+      '2026-11-14',
+      '',
+      240,
+      '04:00',
+      null,
+      JSON.stringify({ grid: '🟩🟩\n🟨🟠' }),
+      0,
+    );
+    legacy.close();
+
+    const db = createDatabase({ dbPath });
+
+    // compete column added with default true
+    const p1Games = db.listGames({ userId: 1 });
+    assert.equal(p1Games.every((g) => g.compete === true), true);
+
+    // Magnitudle -> Size It Up while custom user name preserved
+    const magP1 = p1Games.find((g) => g.slug === 'magnitudle');
+    assert.equal(magP1?.name, 'Size It Up');
+    assert.equal(magP1?.url, 'https://magnitudle.com/size-it-up');
+    assert.equal(magP1?.category, 'Estimation');
+    const customP2 = db.listGames({ userId: 2 }).find((g) => g.slug === 'magnitudle');
+    assert.equal(customP2?.name, 'Custom Size Game');
+
+    // Catalog upgraded and all 26 optional collection games present
+    const catalog = db.listCatalogGames({ userId: 1 });
+    assert.equal(catalog.find((c) => c.slug === 'magnitudle')?.name, 'Size It Up');
+    assert.equal(catalog.filter((c) => c.isOptional).length, 26);
+
+    // Clues accuracy backfilled for rawText, manual_override+difficultyOverride, and grid-only metadata entries
+    const e1 = db.getEntryById(1, 1);
+    assert.equal(e1.metadata.yellowCount, 1);
+    assert.equal(e1.metadata.singleHintCount, 1);
+    assert.equal(e1.metadata.doubleHintCount, 1);
+    assert.equal(e1.metadata.accuracyPenalty, 6);
+    assert.equal(e1.metadata.totalTiles, 8);
+    assert.equal(e1.metadata.isPerfect, false);
+
+    const e2 = db.getEntryById(2, 1);
+    assert.equal(e2.primaryValue, 777);
+    assert.equal(e2.displayValue, 'Custom 777');
+    assert.equal(e2.difficulty, 'Brutal');
+    assert.equal(e2.metadata.difficultyOverride, true);
+    assert.equal(e2.metadata.accuracyPenalty, 0);
+    assert.equal(e2.metadata.accuracySummary, '8/8 🟩');
+
+    const e3 = db.getEntryById(3, 1);
+    assert.equal(e3.metadata.accuracyPenalty, 4);
+    assert.equal(e3.metadata.totalTiles, 4);
+
+    assert.ok(
+      db.sqlite
+        .prepare("SELECT 1 FROM schema_migrations WHERE id = 'clues_accuracy_sizeitup_and_collections_v1'")
+        .get(),
+    );
+    db.close();
+
+    // Idempotent reopen
+    const db2 = createDatabase({ dbPath });
+    assert.equal(db2.getEntryById(1, 1).metadata.accuracyPenalty, 6);
     db2.close();
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

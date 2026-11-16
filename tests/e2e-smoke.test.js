@@ -160,7 +160,7 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
       'Perceptle',
       'PricePoint',
       'Fermi',
-      'Magnitudle',
+      'Size It Up',
       'Plain',
       'TimeGuessr',
       'Eraly',
@@ -203,7 +203,7 @@ test('E2E smoke: static assets, auth lifecycle, isolation, bootstrap, detect, en
   const perceptleGame = boot1.json.games.find((g) => g.name === 'Perceptle');
   const pricepointGame = boot1.json.games.find((g) => g.name === 'PricePoint');
   const fermiGame = boot1.json.games.find((g) => g.name === 'Fermi');
-  const magnitudleGame = boot1.json.games.find((g) => g.name === 'Magnitudle');
+  const magnitudleGame = boot1.json.games.find((g) => g.name === 'Size It Up');
   const plainGame = boot1.json.games.find((g) => g.name === 'Plain');
   const timeguessrGame = boot1.json.games.find((g) => g.name === 'TimeGuessr');
   const eralyGame = boot1.json.games.find((g) => g.name === 'Eraly');

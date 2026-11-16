@@ -273,6 +273,26 @@
             </div>
           </div>
 
+          <fieldset id="signup-games-fieldset" class="signup-games-fieldset">
+            <div class="signup-games-header">
+              <legend class="field-label">Choose Games to Compete In</legend>
+              <div class="signup-games-header-actions">
+                <span id="signup-selected-count" class="pill pill-neutral tabular-nums">10 selected</span>
+                <button type="button" class="btn btn-secondary btn-xs" id="btn-signup-select-all">Select All</button>
+                <button type="button" class="btn btn-ghost btn-xs" id="btn-signup-clear-all">Clear</button>
+              </div>
+            </div>
+            <p class="signup-games-hint muted-text">Your Leaderboard &amp; Today shelf start with these games — add or toggle any anytime in My Games.</p>
+            <div id="signup-featured-games" class="signup-games-grid"></div>
+            <details id="signup-optional-collections" class="signup-optional-collections">
+              <summary class="signup-optional-summary">
+                <span>✨ Optional Collections (Magnitudle &amp; FlightQ — 26 games)</span>
+                <span class="pill pill-neutral tabular-nums" id="signup-optional-count">0 selected</span>
+              </summary>
+              <div id="signup-optional-body" class="signup-optional-body"></div>
+            </details>
+          </fieldset>
+
           <button type="submit" class="btn btn-primary auth-submit-btn" id="btn-signup-submit">Create Account</button>
         </form>
       </div>
@@ -382,6 +402,8 @@
           </div>
         </section>
 
+        <div id="today-tag-filter-bar" class="today-tag-filter-bar hidden" role="group" aria-label="Filter Today shelf by category"></div>
+
         <!-- Up Next Shelf -->
         <section class="cards-section" id="to-play-section" aria-labelledby="heading-to-play">
           <div class="section-header-row">
@@ -411,7 +433,10 @@
         <div class="leaderboard-hud surface-card">
           <div class="leaderboard-hud-title-block">
             <h2 class="section-title">🏆 Players Leaderboard</h2>
-            <p id="leaderboard-players-subtitle" class="section-subtitle">Loading player standings…</p>
+            <div class="leaderboard-scope-row">
+              <p id="leaderboard-players-subtitle" class="section-subtitle">Loading player standings…</p>
+              <div id="lb-competing-scope-chip" class="lb-competing-scope-chip hidden"></div>
+            </div>
           </div>
 
           <div class="leaderboard-hud-controls">
@@ -459,14 +484,16 @@
                 <span class="arcade-pts-chevron" aria-hidden="true">▾</span>
               </summary>
               <div class="arcade-pts-panel">
-                <p><strong>Daily per-game scoring:</strong> Each puzzle day ranks all players who logged that game:</p>
+                <p><strong>Daily per-game scoring:</strong> Each puzzle day ranks all competing players who logged that game:</p>
                 <ul class="arcade-pts-list">
                   <li><strong>🥇 1st place:</strong> 3 pts · <strong>🥈 2nd place:</strong> 2 pts · <strong>🥉 3rd place:</strong> 1 pt</li>
                   <li><strong>✓ Played / DNF:</strong> 1 pt for logging any completed attempt</li>
                   <li><strong>Ties:</strong> Equal scores share the same medal &amp; points using Olympic 1-2-2-4 ranking</li>
                   <li><strong>Best-score direction:</strong> Lowest time, guesses, or multiplier wins on speed/guess games; highest score wins on points games</li>
+                  <li><strong>Clues by Sam accuracy:</strong> Ranks by grid accuracy penalty first (<code>🟩 = 0</code>, <code>🟨 mistake = 1</code>, <code>🟡 hint = 2</code>, <code>🟠 double hint = 3</code> — lowest penalty wins) and solve time last</li>
+                  <li><strong>Competitive scope:</strong> Leaderboard only shows and ranks your selected competing games (configured at Sign Up or toggled anytime in My Games)</li>
                 </ul>
-                <p class="muted-text">Overall Arcade Pts sum your daily points across all games in the active window (Today, 7d, 30d, 90d, or All).</p>
+                <p class="muted-text">Overall Arcade Pts sum your daily points across your selected competing games in the active window (Today, 7d, 30d, 90d, or All).</p>
               </div>
             </details>
           </div>
@@ -740,8 +767,29 @@
                 ＋ Add Game
               </button>
             </div>
+            <div id="roster-compete-bar" class="roster-compete-bar hidden"></div>
             <div id="manage-games-list" class="manage-games-list"></div>
-            <div id="friends-catalog-shelf" class="friends-catalog-shelf hidden"></div>
+            <div id="friends-catalog-shelf" class="friends-catalog-shelf hidden">
+              <div class="friends-catalog-head">
+                <div>
+                  <h3 class="section-title-sm">✨ Hub Game Catalog &amp; Collections</h3>
+                  <p class="section-subtitle">One-click add friends' games or explore Magnitudle &amp; FlightQ collections</p>
+                </div>
+                <span id="friends-catalog-count" class="count-badge">0</span>
+              </div>
+              <search class="catalog-search-controls">
+                <label for="friends-catalog-search" class="visually-hidden">Filter catalog collections</label>
+                <input
+                  type="search"
+                  id="friends-catalog-search"
+                  name="friendsCatalogSearch"
+                  class="text-input input-sm"
+                  placeholder="Filter games, tags, or URLs…"
+                >
+                <div id="friends-catalog-tag-bar" class="catalog-tag-bar" role="group" aria-label="Filter catalog by topic tag"></div>
+              </search>
+              <div id="friends-catalog-collections" class="catalog-collections-stack"></div>
+            </div>
           </section>
 
           <!-- Backup & Restore -->
@@ -968,18 +1016,21 @@
         <div class="catalog-picker-head">
           <div>
             <h3 id="catalog-picker-title" class="section-title-sm">🕹️ Hub Game Catalog</h3>
-            <p class="section-subtitle">One-click add games your friends already play</p>
+            <p class="section-subtitle">One-click add friends' games or Magnitudle &amp; FlightQ collections</p>
           </div>
         </div>
-        <label for="catalog-search-input" class="visually-hidden">Filter hub game catalog</label>
-        <input
-          type="search"
-          id="catalog-search-input"
-          name="catalogSearch"
-          class="text-input input-sm"
-          placeholder="Filter games or URLs…"
-        >
-        <div id="catalog-available-list" class="catalog-list"></div>
+        <search class="catalog-search-controls">
+          <label for="catalog-search-input" class="visually-hidden">Filter hub game catalog</label>
+          <input
+            type="search"
+            id="catalog-search-input"
+            name="catalogSearch"
+            class="text-input input-sm"
+            placeholder="Filter games, tags, or URLs…"
+          >
+          <div id="catalog-tag-bar" class="catalog-tag-bar" role="group" aria-label="Filter catalog by topic tag"></div>
+        </search>
+        <div id="catalog-available-list" class="catalog-collections-stack"></div>
         <details id="catalog-owned-details" class="catalog-owned-details">
           <summary id="catalog-owned-summary">Already on your shelf</summary>
           <div id="catalog-owned-list" class="catalog-list"></div>

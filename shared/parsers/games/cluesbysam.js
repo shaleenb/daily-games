@@ -52,7 +52,8 @@ const DAY_FIRST_DATE_REGEX = new RegExp(
   'i'
 );
 
-const HINT_TILES = new Set(['🟧', '🟥', '💡', '❓', '⬜', '⬛']);
+const LEGACY_SINGLE_HINT_TILES = new Set(['🟧', '💡', '❓', '⬜', '⬛']);
+const LEGACY_DOUBLE_HINT_TILES = new Set(['🟥']);
 
 /**
  * Normalize a Clues by Sam difficulty label into canonical casing
@@ -174,15 +175,24 @@ function extractSolveSeconds(rawText) {
   return null;
 }
 
-function analyzeGrid(emojiGrid) {
-  if (!emojiGrid) return null;
-  const rows = emojiGrid.split('\n').map((line) => line.trim()).filter(Boolean);
+/**
+ * Analyze a Clues by Sam emoji grid into weighted accuracy & hint tile metrics.
+ * Returns null if emojiGrid is empty.
+ */
+export function analyzeCluesBySamGrid(emojiGrid) {
+  if (typeof emojiGrid !== 'string' || !emojiGrid.trim()) return null;
+  const rows = emojiGrid
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
   if (rows.length === 0) return null;
 
+  const normalizedGrid = rows.join('\n');
   let gridCols = 0;
   let greenCount = 0;
   let yellowCount = 0;
-  let hintCount = 0;
+  let singleHintCount = 0;
+  let doubleHintCount = 0;
 
   for (const row of rows) {
     const tiles = Array.from(row.replace(/[\uFE0F\u200D\s]/g, ''));
@@ -194,28 +204,60 @@ function analyzeGrid(emojiGrid) {
         greenCount += 1;
       } else if (tile === '🟨') {
         yellowCount += 1;
-      } else if (HINT_TILES.has(tile)) {
-        hintCount += 1;
+      } else if (tile === '🟡' || LEGACY_SINGLE_HINT_TILES.has(tile)) {
+        singleHintCount += 1;
+      } else if (tile === '🟠' || LEGACY_DOUBLE_HINT_TILES.has(tile)) {
+        doubleHintCount += 1;
       }
     }
   }
 
+  const hintCount = singleHintCount + doubleHintCount;
+  const totalHintWeight = singleHintCount + 2 * doubleHintCount;
+  const totalTiles = greenCount + yellowCount + singleHintCount + doubleHintCount;
+  const accuracyPenalty = yellowCount + 2 * singleHintCount + 3 * doubleHintCount;
+  const isPerfect = totalTiles > 0 && accuracyPenalty === 0;
+
+  let accuracySummary = null;
+  if (totalTiles > 0) {
+    if (isPerfect) {
+      accuracySummary = `${greenCount}/${totalTiles} 🟩`;
+    } else {
+      accuracySummary = [
+        greenCount && `${greenCount}🟩`,
+        yellowCount && `${yellowCount}🟨`,
+        singleHintCount && `${singleHintCount}🟡`,
+        doubleHintCount && `${doubleHintCount}🟠`,
+      ]
+        .filter(Boolean)
+        .join(' ');
+    }
+  }
+
   return {
-    emojiGrid,
-    grid: emojiGrid,
+    emojiGrid: normalizedGrid,
+    grid: normalizedGrid,
     gridRows: rows.length,
     gridCols,
     cleanCount: greenCount,
     greenCount,
     yellowCount,
+    mistakeCount: yellowCount,
+    singleHintCount,
+    doubleHintCount,
     hintCount,
+    totalHintWeight,
+    totalTiles,
+    accuracyPenalty,
+    isPerfect,
+    accuracySummary,
   };
 }
 
 export const cluesBySamParser = {
   id: 'cluesbysam',
   name: 'Clues by Sam',
-  version: 1,
+  version: 3,
   isCustomParser: true,
   supportedSlugs: ['cluesbysam', 'clues-by-sam'],
   supportedDomains: ['cluesbysam.com'],
@@ -233,7 +275,7 @@ export const cluesBySamParser = {
     const difficulty = extractDifficulty(text);
     const seconds = extractSolveSeconds(text);
     const emojiGrid = extractEmojiGrid(text);
-    const gridStats = analyzeGrid(emojiGrid);
+    const gridStats = analyzeCluesBySamGrid(emojiGrid);
 
     const isDnf = /\b(dnf|failed|did not finish|game over|unsolved|gave up)\b/i.test(text);
     let solved = null;
@@ -262,7 +304,7 @@ export const cluesBySamParser = {
 
     return {
       parserId: 'cluesbysam',
-      parserVersion: 1,
+      parserVersion: 3,
       isCustomParser: true,
       completed: true,
       solved,

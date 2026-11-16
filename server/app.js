@@ -288,6 +288,7 @@ export function createApp({ dbPath = DEFAULT_DB_PATH } = {}) {
           gamesCount: status.unclaimedGamesCount,
           entriesCount: status.unclaimedEntriesCount,
         },
+        signupCatalog: db.listPublicSignupCatalog(),
       });
       return;
     }
@@ -305,6 +306,17 @@ export function createApp({ dbPath = DEFAULT_DB_PATH } = {}) {
       if (!passwordCheck.valid) {
         throw new ValidationError(passwordCheck.error);
       }
+      if (body?.competingSlugs !== undefined) {
+        if (
+          !Array.isArray(body.competingSlugs) ||
+          body.competingSlugs.some((s) => typeof s !== 'string')
+        ) {
+          throw new ValidationError('competingSlugs must be an array of strings');
+        }
+        if (body.competingSlugs.length === 0) {
+          throw new ValidationError('Please select at least one valid game to compete in');
+        }
+      }
 
       const email = normalizeEmail(body.email);
       if (db.getUserByEmail(email)) {
@@ -317,6 +329,7 @@ export function createApp({ dbPath = DEFAULT_DB_PATH } = {}) {
         email,
         passwordHash: hashHex,
         passwordSalt: saltHex,
+        competingSlugs: body?.competingSlugs,
       });
 
       const { rawToken, tokenHash, sessionId, expiresAt } = await generateSessionToken();
@@ -479,7 +492,12 @@ export function createApp({ dbPath = DEFAULT_DB_PATH } = {}) {
 
     if (method === 'POST' && pathname === '/api/catalog/subscribe') {
       const body = await readJsonBody(req);
-      const result = db.subscribeCatalogGame(body?.slug, userId);
+      if (body?.compete !== undefined && typeof body.compete !== 'boolean') {
+        throw new ValidationError('compete must be a boolean');
+      }
+      const result = db.subscribeCatalogGame(body?.slug, userId, {
+        compete: body?.compete ?? true,
+      });
       sendJson(res, result.status === 'subscribed' ? 201 : 200, result);
       return;
     }

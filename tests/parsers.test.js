@@ -19,6 +19,7 @@ import {
   formatCountdownCompact,
   getGamePuzzleStatus,
   CLUES_BY_SAM_DIFFICULTIES,
+  analyzeCluesBySamGrid,
   normalizeDifficultyLabel,
   ERALY_BANDS,
   PERCEPTLE_ROUNDS,
@@ -32,13 +33,24 @@ import {
 import { cluesBySamParser } from '../shared/parsers/games/cluesbysam.js';
 import { eralyParser } from '../shared/parsers/games/eraly.js';
 import { fermiParser } from '../shared/parsers/games/fermi.js';
+import { flightqParser } from '../shared/parsers/games/flightq.js';
 import { magnitudleParser } from '../shared/parsers/games/magnitudle.js';
+import { passportqParser } from '../shared/parsers/games/passportq.js';
 import { perceptleParser } from '../shared/parsers/games/perceptle.js';
 import { plainParser } from '../shared/parsers/games/plain.js';
 import { timeguessrParser } from '../shared/parsers/games/timeguessr.js';
 import { wordleParser } from '../shared/parsers/games/wordle.js';
 import { extractPuzzleId } from '../shared/parsers/utils.js';
-import { STARTER_GAMES } from '../shared/auth-crypto.js';
+import {
+  BUILTIN_CATALOG_BY_SLUG,
+  BUILTIN_CATALOG_GAMES,
+  BUILTIN_CATALOG_SLUG_SET,
+  OPTIONAL_CATALOG_GAMES,
+  OPTIONAL_CATALOG_SLUG_SET,
+  STARTER_GAMES,
+  STARTER_SLUG_SET,
+  enrichGameMetadata,
+} from '../shared/auth-crypto.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SHARED_PARSERS_DIR = path.resolve(__dirname, '../shared/parsers');
@@ -710,7 +722,7 @@ test('cluesBySamParser: difficulties, month-name dates, emoji grid stats, and pu
   assert.equal(cluesBySamParser.canParse(realShare), true);
   const parsedReal = cluesBySamParser.parse(realShare);
   assert.equal(parsedReal.parserId, 'cluesbysam');
-  assert.equal(parsedReal.parserVersion, 1);
+  assert.equal(parsedReal.parserVersion, 3);
   assert.equal(parsedReal.isCustomParser, true);
   assert.equal(parsedReal.completed, true);
   assert.equal(parsedReal.solved, true);
@@ -900,6 +912,12 @@ test('STARTER_GAMES & detectGameAndParse: includes 10 starter games including Er
   assert.equal(fermiStarter.sortOrder, 6);
 
   const magnitudleStarter = STARTER_GAMES.find((g) => g.slug === 'magnitudle');
+  assert.equal(magnitudleStarter.name, 'Size It Up');
+  assert.equal(magnitudleStarter.url, 'https://magnitudle.com/size-it-up');
+  assert.equal(magnitudleStarter.category, 'Estimation');
+  assert.equal(magnitudleStarter.collection, 'Magnitudle');
+  assert.deepEqual(magnitudleStarter.tags, ['Estimation', 'Scale']);
+  assert.equal(magnitudleStarter.tagline, 'Five-round daily size estimation puzzle');
   assert.equal(magnitudleStarter.parserId, 'magnitudle');
   assert.equal(magnitudleStarter.sortOrder, 7);
 
@@ -1454,4 +1472,406 @@ test('eralyParser: ERALY_BANDS, standard share 515/700, (Archive) 🎃, BC year,
   assert.equal(res4.metadata.emojiGrid, '🟨🟦🟩🟧🟥🟨💤');
 
   assert.equal(eralyParser.canParse('Wordle 1,234 4/6'), false);
+});
+
+test('STARTER_GAMES[6] & OPTIONAL_CATALOG_GAMES & enrichGameMetadata', () => {
+  assert.equal(STARTER_GAMES[6].slug, 'magnitudle');
+  assert.equal(STARTER_GAMES[6].name, 'Size It Up');
+  for (const starter of STARTER_GAMES) {
+    assert.ok(Array.isArray(starter.tags) && starter.tags.length >= 1);
+  }
+
+  assert.equal(OPTIONAL_CATALOG_GAMES.length, 26);
+  assert.equal(BUILTIN_CATALOG_GAMES.length, 36);
+  assert.equal(STARTER_SLUG_SET.size, 10);
+  assert.equal(OPTIONAL_CATALOG_SLUG_SET.size, 26);
+  assert.equal(BUILTIN_CATALOG_SLUG_SET.size, 36);
+
+  const magnOptional = OPTIONAL_CATALOG_GAMES.filter((g) => g.collection === 'Magnitudle');
+  assert.equal(magnOptional.length, 2);
+  assert.deepEqual(
+    magnOptional.map((g) => g.slug),
+    ['weigh-it-up', 'magnitudle-daily']
+  );
+
+  const flightqOptional = OPTIONAL_CATALOG_GAMES.filter((g) => g.collection === 'FlightQ');
+  assert.equal(flightqOptional.length, 24);
+  for (const game of OPTIONAL_CATALOG_GAMES) {
+    assert.ok(Array.isArray(game.tags) && game.tags.length >= 1, `Missing tags on ${game.slug}`);
+    assert.ok(typeof game.tagline === 'string' && game.tagline.length > 0);
+    assert.equal(BUILTIN_CATALOG_BY_SLUG.get(game.slug)?.name, game.name);
+  }
+
+  assert.equal(OPTIONAL_CATALOG_BY_CHECK('passportq')?.parserId, 'passportq');
+  assert.equal(OPTIONAL_CATALOG_BY_CHECK('skyq')?.parserId, 'flightq');
+  assert.equal(OPTIONAL_CATALOG_BY_CHECK('airportq')?.parserId, 'flightq');
+
+  function OPTIONAL_CATALOG_BY_CHECK(slug) {
+    return OPTIONAL_CATALOG_GAMES.find((g) => g.slug === slug);
+  }
+
+  // enrichGameMetadata checks
+  const starterMeta = enrichGameMetadata(STARTER_GAMES[6]);
+  assert.deepEqual(starterMeta, {
+    isStarter: true,
+    isOptional: false,
+    collection: 'Magnitudle',
+    tags: ['Estimation', 'Scale'],
+    tagline: 'Five-round daily size estimation puzzle',
+  });
+
+  const optMeta = enrichGameMetadata({ slug: 'passportq', category: 'Cities' });
+  assert.equal(optMeta.isStarter, false);
+  assert.equal(optMeta.isOptional, true);
+  assert.equal(optMeta.collection, 'FlightQ');
+  assert.deepEqual(optMeta.tags, ['Cities', 'Geography']);
+
+  const urlFallbackMeta = enrichGameMetadata({
+    slug: 'custom-flight',
+    url: 'https://flightq.app/custom',
+    category: 'Aviation',
+  });
+  assert.equal(urlFallbackMeta.collection, 'FlightQ');
+  assert.deepEqual(urlFallbackMeta.tags, ['Aviation']);
+
+  const friendMeta = enrichGameMetadata(
+    { slug: 'my-friend-game', url: 'https://example.com', category: 'Word' },
+    { createdByUserId: 7, createdByName: 'Alex' }
+  );
+  assert.equal(friendMeta.collection, "Friends' Picks");
+  assert.deepEqual(friendMeta.tags, ['Word']);
+
+  const cluesMeta = enrichGameMetadata(STARTER_GAMES[0]);
+  assert.equal(cluesMeta.isStarter, true);
+  assert.equal(cluesMeta.collection, null);
+});
+
+test('cluesBySamParser & analyzeCluesBySamGrid: weighted accuracy tile metrics (🟩, 🟨, 🟡, 🟠)', () => {
+  assert.equal(analyzeCluesBySamGrid(''), null);
+  assert.equal(analyzeCluesBySamGrid(null), null);
+
+  const perfect = analyzeCluesBySamGrid('🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩\n🟩🟩🟩🟩');
+  assert.equal(perfect.greenCount, 20);
+  assert.equal(perfect.cleanCount, 20);
+  assert.equal(perfect.yellowCount, 0);
+  assert.equal(perfect.singleHintCount, 0);
+  assert.equal(perfect.doubleHintCount, 0);
+  assert.equal(perfect.hintCount, 0);
+  assert.equal(perfect.totalHintWeight, 0);
+  assert.equal(perfect.totalTiles, 20);
+  assert.equal(perfect.accuracyPenalty, 0);
+  assert.equal(perfect.isPerfect, true);
+  assert.equal(perfect.accuracySummary, '20/20 🟩');
+
+  const mixedShare = [
+    'I solved the daily #CluesBySam, Nov 17th 2026 (Hard), in 04:12',
+    '🟩🟩🟨🟩',
+    '🟩🟡🟩🟩',
+    '🟩🟠🟨🟩',
+    '🟩🟩🟩🟡',
+    '🟩🟩🟩🟩',
+    'https://cluesbysam.com',
+  ].join('\n');
+
+  const res = cluesBySamParser.parse(mixedShare);
+  assert.equal(res.parserVersion, 3);
+  assert.equal(res.puzzleDate, '2026-11-17');
+  assert.equal(res.metadata.difficulty, 'Hard');
+  assert.equal(res.primaryValue, 252);
+  assert.equal(res.metadata.greenCount, 15);
+  assert.equal(res.metadata.cleanCount, 15);
+  assert.equal(res.metadata.yellowCount, 2);
+  assert.equal(res.metadata.mistakeCount, 2);
+  assert.equal(res.metadata.singleHintCount, 2);
+  assert.equal(res.metadata.doubleHintCount, 1);
+  assert.equal(res.metadata.hintCount, 3);
+  assert.equal(res.metadata.totalHintWeight, 4);
+  assert.equal(res.metadata.totalTiles, 20);
+  assert.equal(res.metadata.accuracyPenalty, 9); // 2*1 + 2*2 + 1*3 = 9
+  assert.equal(res.metadata.isPerfect, false);
+  assert.equal(res.metadata.accuracySummary, '15🟩 2🟨 2🟡 1🟠');
+});
+
+test('magnitudleParser: Size It Up vs Weigh It Up vs Daily Question routing without cross-contamination', () => {
+  assert.equal(magnitudleParser.version, 2);
+  assert.equal(magnitudleParser.detectGameSlug('Size It Up\n#99\nScore: 116/500'), 'magnitudle');
+  assert.equal(
+    magnitudleParser.detectGameSlug('Weigh It Up #12\nScore: 420/500\nhttps://magnitudle.com/weigh-it-up'),
+    'weigh-it-up'
+  );
+  assert.equal(
+    magnitudleParser.detectGameSlug('Daily Question #10\nhttps://magnitudle.com/daily\nScore: 94%'),
+    'magnitudle-daily'
+  );
+  assert.equal(magnitudleParser.detectGameSlug('Magnitudle #77\nScore: 950'), null);
+
+  const starterOnlyShelf = STARTER_GAMES.map((g, i) => ({ ...g, id: i + 1, archived: false }));
+
+  // Size It Up matches starter slug 'magnitudle'
+  const sizeRes = detectGameAndParse(
+    'Size It Up\n#99\nScore: 116/500\n🟥🟥⬜⬜⬜ 39\nhttps://magnitudle.com/size-it-up',
+    starterOnlyShelf
+  );
+  assert.equal(sizeRes.matchedGame?.slug, 'magnitudle');
+  assert.equal(sizeRes.matchedGame?.name, 'Size It Up');
+  assert.equal(sizeRes.parserId, 'magnitudle');
+
+  // Weigh It Up paste MUST NOT select Size It Up when Weigh It Up is absent from shelf
+  const weighShare = 'Weigh It Up #12\nScore: 420/500\nhttps://magnitudle.com/weigh-it-up';
+  assert.equal(magnitudleParser.canParse(weighShare), true);
+  const weighUnlisted = detectGameAndParse(weighShare, starterOnlyShelf);
+  assert.equal(weighUnlisted.matchedGame, null);
+  assert.equal(weighUnlisted.parserId, 'magnitudle');
+  assert.equal(weighUnlisted.parsed.primaryValue, 420);
+  assert.equal(weighUnlisted.parsed.displayValue, '420/500');
+
+  // Daily Question percentage score and shelf match when added
+  const dailyShare = 'Daily Question #10\nhttps://magnitudle.com/daily\nAccuracy: 94%';
+  assert.equal(magnitudleParser.canParse(dailyShare), true);
+  const dailyUnlisted = detectGameAndParse(dailyShare, starterOnlyShelf);
+  assert.equal(dailyUnlisted.matchedGame, null);
+  assert.equal(dailyUnlisted.parsed.primaryValue, 94);
+  assert.equal(dailyUnlisted.parsed.displayValue, '94%');
+
+  const fullMagnShelf = [
+    ...starterOnlyShelf,
+    { ...OPTIONAL_CATALOG_GAMES[0], id: 101, archived: false },
+    { ...OPTIONAL_CATALOG_GAMES[1], id: 102, archived: false },
+  ];
+  const weighListed = detectGameAndParse(weighShare, fullMagnShelf);
+  assert.equal(weighListed.matchedGame?.slug, 'weigh-it-up');
+  const dailyListed = detectGameAndParse(dailyShare, fullMagnShelf);
+  assert.equal(dailyListed.matchedGame?.slug, 'magnitudle-daily');
+});
+
+test('passportqParser: parses v1/v2 formats, single-tile 1/5 solve, and stumped X/5 misses', () => {
+  assert.equal(getParserById('passportq'), passportqParser);
+  assert.equal(
+    getParserForGame({
+      name: 'PassportQ',
+      slug: 'passportq',
+      url: 'https://flightq.app/passportq',
+      parserId: 'auto',
+    }),
+    passportqParser
+  );
+
+  // 1/5 single-tile solve
+  const oneGuess = [
+    'PassportQ #253',
+    'Solved in 1/5',
+    '🟩',
+    'https://passportq.app',
+  ].join('\n');
+  assert.equal(passportqParser.canParse(oneGuess), true);
+  assert.equal(flightqParser.canParse(oneGuess), false);
+  const res1 = passportqParser.parse(oneGuess);
+  assert.equal(res1.parserId, 'passportq');
+  assert.equal(res1.puzzleId, '#253');
+  assert.equal(res1.solved, true);
+  assert.equal(res1.primaryValue, 1);
+  assert.equal(res1.displayValue, '1/5');
+  assert.equal(res1.metricFormat, 'fraction');
+  assert.equal(res1.metricDirection, 'lower_is_better');
+  assert.equal(res1.metricLabel, 'Guesses');
+  assert.equal(res1.metadata.emojiGrid, '🟩');
+
+  // flightq.app/sp/?ref=pq link + multi-guess
+  const spRefPq = [
+    'PassportQ No. 254',
+    'Solved in 3/5',
+    '⬛🟨🟩',
+    'https://flightq.app/sp/abc?ref=pq',
+  ].join('\n');
+  assert.equal(passportqParser.canParse(spRefPq), true);
+  assert.equal(flightqParser.canParse(spRefPq), false);
+  const res2 = passportqParser.parse(spRefPq);
+  assert.equal(res2.puzzleId, '#254');
+  assert.equal(res2.primaryValue, 3);
+  assert.equal(res2.displayValue, '3/5');
+  assert.equal(res2.metadata.emojiGrid, '⬛🟨🟩');
+
+  // Stumped miss -> X/5
+  const stumped = [
+    'PassportQ Day 255',
+    'Stumped me!',
+    '⬛⬛🟨⬛⬛',
+    'https://flightq.app/passportq',
+  ].join('\n');
+  assert.equal(passportqParser.canParse(stumped), true);
+  const res3 = passportqParser.parse(stumped);
+  assert.equal(res3.puzzleId, '#255');
+  assert.equal(res3.solved, false);
+  assert.equal(res3.primaryValue, null);
+  assert.equal(res3.displayValue, 'X/5');
+  assert.equal(res3.metadata.emojiGrid, '⬛⬛🟨⬛⬛');
+});
+
+test('flightqParser: parses SkyQ, AirportQ, CityQ, Mapfold, aliases, and isolates games on multi-game shelves', () => {
+  assert.equal(getParserById('flightq'), flightqParser);
+  assert.equal(
+    getParserForGame({
+      name: 'SkyQ',
+      slug: 'skyq',
+      url: 'https://flightq.app/skyq',
+      parserId: 'auto',
+    }),
+    flightqParser
+  );
+  assert.equal(
+    getParserForGame({ name: 'Layers', slug: 'layers', parserId: 'auto' }),
+    flightqParser
+  );
+
+  // Bare generic English words must not trigger flightqParser
+  assert.equal(flightqParser.canParse('The circle radius is 12'), false);
+  assert.equal(flightqParser.canParse('Vector graphics score 100'), false);
+
+  // SkyQ fraction solve
+  const skyqShare = [
+    'SkyQ No. 42 (Medium)',
+    'Solved in 3/5',
+    '⬛🟨🟩',
+    'https://skyq.app',
+  ].join('\n');
+  assert.equal(flightqParser.canParse(skyqShare), true);
+  assert.equal(flightqParser.detectGameSlug(skyqShare), 'skyq');
+  const skyRes = flightqParser.parse(skyqShare);
+  assert.equal(skyRes.puzzleId, '#42');
+  assert.equal(skyRes.solved, true);
+  assert.equal(skyRes.primaryValue, 3);
+  assert.equal(skyRes.displayValue, '3/5');
+  assert.equal(skyRes.metadata.difficulty, 'Medium');
+  assert.equal(skyRes.metadata.emojiGrid, '⬛🟨🟩');
+
+  // AirportQ miss with single/multi grid
+  const airportqShare = [
+    'AirportQ No. 88 (Hard)',
+    'Missed it!',
+    '⬛⬛⬛⬛⬛',
+    'https://flightq.app/airportq',
+  ].join('\n');
+  assert.equal(flightqParser.detectGameSlug(airportqShare), 'airportq');
+  const apRes = flightqParser.parse(airportqShare);
+  assert.equal(apRes.puzzleId, '#88');
+  assert.equal(apRes.solved, false);
+  assert.equal(apRes.primaryValue, null);
+  assert.equal(apRes.displayValue, 'X/5');
+  assert.equal(apRes.metadata.difficulty, 'Hard');
+
+  // CityQ (3x3 grid score out of 9 respecting gameContext)
+  const cityqShare = [
+    'CityQ #19 (World)',
+    '8/9',
+    '🟩🟩🟩',
+    '🟩⬛🟩',
+    '🟩🟩🟩',
+    'https://flightq.app/cityq',
+  ].join('\n');
+  assert.equal(flightqParser.detectGameSlug(cityqShare), 'cityq');
+  const cityRes = flightqParser.parse(cityqShare, {
+    metricFormat: 'number',
+    metricDirection: 'higher_is_better',
+    metricLabel: 'Score',
+  });
+  assert.equal(cityRes.puzzleId, '#19');
+  assert.equal(cityRes.primaryValue, 8);
+  assert.equal(cityRes.displayValue, '8/9');
+  assert.equal(cityRes.metricLabel, 'Score');
+  assert.equal(cityRes.metadata.mode, 'World');
+  assert.equal(cityRes.metadata.maxScore, 9);
+
+  // Mapfold score
+  const mapfoldShare = 'Mapfold #77\nScore: 850/1000\nhttps://mapfold.app';
+  assert.equal(flightqParser.detectGameSlug(mapfoldShare), 'mapfold');
+  const mfRes = flightqParser.parse(mapfoldShare);
+  assert.equal(mfRes.puzzleId, '#77');
+  assert.equal(mfRes.primaryValue, 850);
+  assert.equal(mfRes.displayValue, '850/1000');
+  assert.equal(mfRes.metadata.maxScore, 1000);
+
+  // URL alias detection (/layers -> strata, /scaleq -> airspan, ?ref=skyq -> skyq)
+  assert.equal(flightqParser.detectGameSlug('https://flightq.app/layers'), 'strata');
+  assert.equal(flightqParser.detectGameSlug('https://flightq.app/scaleq'), 'airspan');
+  assert.equal(flightqParser.detectGameSlug('https://flightq.app/sp/abc?ref=skyq'), 'skyq');
+  assert.equal(flightqParser.detectGameSlug('FlightQ No. 12\nSolved in 1/5\n🟩'), 'skyq');
+
+  // Multi-game shelf disambiguation (no cross-contamination!)
+  const skyqOnlyShelf = [
+    {
+      id: 201,
+      slug: 'skyq',
+      name: 'SkyQ',
+      aliases: ['FlightQ', 'flightq'],
+      url: 'https://flightq.app/skyq',
+      parserId: 'flightq',
+      metricFormat: 'fraction',
+      metricDirection: 'lower_is_better',
+      metricLabel: 'Guesses',
+      archived: false,
+    },
+  ];
+  const airportOnSkyqShelf = detectGameAndParse(airportqShare, skyqOnlyShelf);
+  assert.equal(airportOnSkyqShelf.matchedGame, null);
+  assert.equal(airportOnSkyqShelf.parserId, 'flightq');
+
+  const multiFlightqShelf = [
+    ...skyqOnlyShelf,
+    {
+      id: 202,
+      slug: 'passportq',
+      name: 'PassportQ',
+      url: 'https://flightq.app/passportq',
+      parserId: 'passportq',
+      metricFormat: 'fraction',
+      metricDirection: 'lower_is_better',
+      metricLabel: 'Guesses',
+      archived: false,
+    },
+    {
+      id: 203,
+      slug: 'airportq',
+      name: 'AirportQ',
+      url: 'https://flightq.app/airportq',
+      parserId: 'flightq',
+      metricFormat: 'fraction',
+      metricDirection: 'lower_is_better',
+      metricLabel: 'Guesses',
+      archived: false,
+    },
+    {
+      id: 204,
+      slug: 'cityq',
+      name: 'CityQ',
+      url: 'https://flightq.app/cityq',
+      parserId: 'flightq',
+      metricFormat: 'number',
+      metricDirection: 'higher_is_better',
+      metricLabel: 'Score',
+      archived: false,
+    },
+    {
+      id: 205,
+      slug: 'mapfold',
+      name: 'Mapfold',
+      url: 'https://flightq.app/mapfold',
+      parserId: 'flightq',
+      metricFormat: 'number',
+      metricDirection: 'higher_is_better',
+      metricLabel: 'Score',
+      archived: false,
+    },
+  ];
+
+  assert.equal(detectGameAndParse(skyqShare, multiFlightqShelf).matchedGame?.slug, 'skyq');
+  assert.equal(detectGameAndParse(airportqShare, multiFlightqShelf).matchedGame?.slug, 'airportq');
+  assert.equal(detectGameAndParse(cityqShare, multiFlightqShelf).matchedGame?.slug, 'cityq');
+  assert.equal(detectGameAndParse(mapfoldShare, multiFlightqShelf).matchedGame?.slug, 'mapfold');
+  const pqDetect = detectGameAndParse(
+    'PassportQ #253\nSolved in 1/5\n🟩\nhttps://flightq.app/passportq',
+    multiFlightqShelf
+  );
+  assert.equal(pqDetect.matchedGame?.slug, 'passportq');
+  assert.equal(pqDetect.parserId, 'passportq');
+  assert.equal(pqDetect.parsed.metadata.emojiGrid, '🟩');
 });

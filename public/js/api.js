@@ -94,10 +94,10 @@ export const api = {
     return requestJson('/api/catalog');
   },
 
-  subscribeCatalogGame(slug) {
+  subscribeCatalogGame(slug, options = {}) {
     return requestJson('/api/catalog/subscribe', {
       method: 'POST',
-      body: { slug },
+      body: { slug, ...options },
     });
   },
 
