@@ -76,3 +76,8 @@ D1 SQL schema migrations live in `migrations/`, with idempotent runtime checks a
 - `migrations/` — D1 SQL schema migrations
 - `scripts/` — Static asset build (`build-cf-assets.mjs`) and backup utilities
 - `tests/` — `node:test` suites (`parsers.test.js`, `api.test.js`, `e2e-smoke.test.js`, `worker-d1.test.js`)
+
+## License
+
+Released under the [MIT License](./LICENSE).
+
