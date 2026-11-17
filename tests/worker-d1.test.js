@@ -2442,13 +2442,15 @@ test('Worker Clues by Sam accuracy-first weighted Leaderboard ranking, spoiler s
   }
 
   const getCluesId = async (c) => (await c.call('/api/games')).json.games[0].id;
-  const playDate = '2026-11-16';
+  const aliceCluesId = await getCluesId(alice);
+  const aliceBoot = await alice.call('/api/bootstrap?live=1');
+  const playDate = aliceBoot.json.cardSummaries[aliceCluesId].puzzleStatus.activePuzzleDate;
 
   // Alice: slower (03:00) but PERFECT grid (penalty 0) -> Rank 1
   const aEntry = await alice.call('/api/entries', {
     method: 'POST',
     body: {
-      gameId: await getCluesId(alice),
+      gameId: aliceCluesId,
       playDate,
       rawText: 'I solved the daily #CluesBySam, Nov 16th 2026 (Hard), in 03:00\n🟩🟩🟩🟩\n🟩🟩🟩🟩',
     },
@@ -2495,7 +2497,7 @@ test('Worker Clues by Sam accuracy-first weighted Leaderboard ranking, spoiler s
   assert.equal(dEntry.json.entry.metadata.accuracyPenalty, 3);
 
   // Unplayed viewer (Eve) sees spoiler-redacted Clues grid & accuracy on active puzzle
-  const eveLb = await eve.call(`/api/leaderboard?date=${playDate}&days=30&gameSlug=cluesbysam`);
+  const eveLb = await eve.call(`/api/leaderboard?date=${playDate}&live=1&days=30&gameSlug=cluesbysam`);
   assert.equal(eveLb.status, 200);
   const eveAliceCell = eveLb.json.todayMatrix.rows.find((r) => r.displayName === 'Alice').cells
     .cluesbysam;
@@ -2504,7 +2506,7 @@ test('Worker Clues by Sam accuracy-first weighted Leaderboard ranking, spoiler s
   assert.equal(eveAliceCell.accuracySummary, null);
 
   // Alice checks leaderboard -> exact weighted accuracy order: Alice > Bob > Charlie > Dana
-  const lb = await alice.call(`/api/leaderboard?date=${playDate}&days=30&gameSlug=cluesbysam`);
+  const lb = await alice.call(`/api/leaderboard?date=${playDate}&live=1&days=30&gameSlug=cluesbysam`);
   assert.equal(lb.status, 200);
   const standings = lb.json.gameBoard.standings;
   assert.equal(standings[0].displayName, 'Alice');
